@@ -9,7 +9,7 @@
 #include <QFileInfo>
 #include <QtConcurrent/QtConcurrent>
 #include <QDir>
-#include <chrono>
+#include <iostream>
 
 namespace pdfmark {
 
@@ -61,27 +61,41 @@ void TaskManager::setPasswords(const std::unordered_map<std::string, std::string
 
 void TaskManager::addFile(const fs::path& path) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (fs::exists(path) && fs::is_regular_file(path)) {
-        queue_.push_back(path);
+    try {
+        if (fs::exists(path) && fs::is_regular_file(path)) {
+            queue_.push_back(path);
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "TaskManager::addFile failed: " << e.what() << std::endl;
+    } catch (...) {
+        std::cerr << "TaskManager::addFile failed: unknown error" << std::endl;
     }
 }
 
 void TaskManager::addFiles(const std::vector<fs::path>& paths) {
     std::lock_guard<std::mutex> lock(mutex_);
     for (const auto& p : paths) {
-        if (fs::exists(p) && fs::is_regular_file(p)) {
-            queue_.push_back(p);
+        try {
+            if (fs::exists(p) && fs::is_regular_file(p)) {
+                queue_.push_back(p);
+            }
+        } catch (...) {
+            // Skip unreadable path
         }
     }
 }
 
 void TaskManager::addFolder(const fs::path& folder) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!fs::exists(folder) || !fs::is_directory(folder)) return;
-    for (const auto& entry : fs::recursive_directory_iterator(folder)) {
-        if (entry.is_regular_file() && entry.path().extension() == ".pdf") {
-            queue_.push_back(entry.path());
+    try {
+        if (!fs::exists(folder) || !fs::is_directory(folder)) return;
+        for (const auto& entry : fs::recursive_directory_iterator(folder)) {
+            if (entry.is_regular_file() && entry.path().extension() == ".pdf") {
+                queue_.push_back(entry.path());
+            }
         }
+    } catch (...) {
+        // Directory traversal failed; skip
     }
 }
 
@@ -149,7 +163,8 @@ FileResult TaskManager::processSingleFile(const fs::path& input,
     std::string password;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        auto it = passwords_.find(input.string());
+        // Use pathToString (UTF-8) to match keys stored from QString::toStdString (UTF-8)
+        auto it = passwords_.find(pathToString(input));
         if (it != passwords_.end()) password = it->second;
     }
     try {
@@ -250,11 +265,11 @@ void TaskManager::start() {
             const auto& task = activeSubtasks[idx];
             const auto& filePath = task.input;
             const auto& cfg = task.config;
-
-            QString fileName = QString::fromStdString(filePath.filename().string());
-            QString displayName = QString("%1 [%2]").arg(fileName, QString::fromStdString(cfg.text));
-
-            emit fileStarted(displayName, static_cast<int>(idx), totalSubtasks);
+            // Use UTF-8 → QString to avoid GBK/ACP corruption on Chinese Windows
+            QString fileName = QString::fromUtf8(filePath.filename().u8string().c_str());
+            QString displayName = QString::fromUtf8("%1 [%2]")
+                .arg(fileName)
+                .arg(QString::fromUtf8(cfg.text));
 
             fs::path outPath = outputPathFor(filePath, cfg.text);
 

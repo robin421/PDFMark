@@ -397,7 +397,8 @@ void MainWindow::onFileSelectionChanged() {
         currentSelectedFile_.clear();
     } else {
         int row = fileTable_->row(items.first());
-        currentSelectedFile_ = fileTable_->item(row, 3)->text();
+        auto* item = fileTable_->item(row, 3);
+        currentSelectedFile_ = item ? item->text() : QString();
     }
     loadWatermarksForSelectedFile();
     updateUiState(false);
@@ -411,29 +412,34 @@ void MainWindow::onAddFiles() {
 
     bool wasEmpty = fileTable_->rowCount() == 0;
     for (const auto& file : files) {
-        fs::path p = file.toStdString();
-        taskManager_.addFile(p);
-
-        int row = fileTable_->rowCount();
-        fileTable_->insertRow(row);
-        QFileInfo fi(file);
-        fileTable_->setItem(row, 0, new QTableWidgetItem(fi.fileName()));
-
-        int pages = 0;
         try {
-            PdfDocumentHandle doc = PdfDocument::open(p);
-            pages = PdfDocument::pageCount(doc.get());
+            fs::path p = qstringToPath(file);
+            taskManager_.addFile(p);
+
+            int row = fileTable_->rowCount();
+            fileTable_->insertRow(row);
+            QFileInfo fi(file);
+            fileTable_->setItem(row, 0, new QTableWidgetItem(fi.fileName()));
+
+            int pages = 0;
+            try {
+                PdfDocumentHandle doc = PdfDocument::open(p);
+                pages = PdfDocument::pageCount(doc.get());
+            } catch (...) {
+                // Might be encrypted or bad format, will show 0 or handle later
+            }
+
+            fileTable_->setItem(row, 1, new QTableWidgetItem(pages > 0 ? QString::number(pages) : "待检测"));
+            fileTable_->setItem(row, 2, new QTableWidgetItem("等待处理"));
+            fileTable_->setItem(row, 3, new QTableWidgetItem(file));
+        } catch (const std::exception& e) {
+            qWarning() << "Failed to add file:" << file << e.what();
         } catch (...) {
-            // Might be encrypted or bad format, will show 0 or handle later
+            qWarning() << "Unknown error adding file:" << file;
         }
-
-        fileTable_->setItem(row, 1, new QTableWidgetItem(pages > 0 ? QString::number(pages) : "待检测"));
-        fileTable_->setItem(row, 2, new QTableWidgetItem("等待处理"));
-        fileTable_->setItem(row, 3, new QTableWidgetItem(file));
-
     }
 
-    if (wasEmpty) {
+    if (wasEmpty && fileTable_->rowCount() > 0) {
         fileTable_->selectRow(0);
     }
 
@@ -451,18 +457,23 @@ void MainWindow::onAddFolder() {
     QFileInfoList list = d.entryInfoList(filters, QDir::Files, QDir::Name);
 
     for (const auto& fi : list) {
-        fs::path p = fi.absoluteFilePath().toStdString();
-        taskManager_.addFile(p);
+        try {
+            QString pathStr = fi.absoluteFilePath();
+            fs::path p = qstringToPath(pathStr);
+            taskManager_.addFile(p);
 
-        int row = fileTable_->rowCount();
-        fileTable_->insertRow(row);
-        fileTable_->setItem(row, 0, new QTableWidgetItem(fi.fileName()));
-        fileTable_->setItem(row, 1, new QTableWidgetItem("待检测"));
-        fileTable_->setItem(row, 2, new QTableWidgetItem("等待处理"));
-        fileTable_->setItem(row, 3, new QTableWidgetItem(fi.absoluteFilePath()));
-
+            int row = fileTable_->rowCount();
+            fileTable_->insertRow(row);
+            fileTable_->setItem(row, 0, new QTableWidgetItem(fi.fileName()));
+            fileTable_->setItem(row, 1, new QTableWidgetItem("待检测"));
+            fileTable_->setItem(row, 2, new QTableWidgetItem("等待处理"));
+            fileTable_->setItem(row, 3, new QTableWidgetItem(pathStr));
+        } catch (const std::exception& e) {
+            qWarning() << "Failed to add folder item:" << fi.absoluteFilePath() << e.what();
+        } catch (...) {
+            qWarning() << "Unknown error adding folder item:" << fi.absoluteFilePath();
+        }
     }
-
     int added = fileTable_->rowCount() - beforeCount;
     if (beforeCount == 0 && added > 0) {
         fileTable_->selectRow(0);
@@ -485,26 +496,30 @@ void MainWindow::dropEvent(QDropEvent* event) {
         QString file = url.toLocalFile();
         if (!file.endsWith(".pdf", Qt::CaseInsensitive)) continue;
 
-        fs::path p = file.toStdString();
-        taskManager_.addFile(p);
-
-        int row = fileTable_->rowCount();
-        fileTable_->insertRow(row);
-        QFileInfo fi(file);
-        fileTable_->setItem(row, 0, new QTableWidgetItem(fi.fileName()));
-
-        int pages = 0;
         try {
-            PdfDocumentHandle doc = PdfDocument::open(p);
-            pages = PdfDocument::pageCount(doc.get());
-        } catch (...) {}
+            fs::path p = qstringToPath(file);
+            taskManager_.addFile(p);
 
-        fileTable_->setItem(row, 1, new QTableWidgetItem(pages > 0 ? QString::number(pages) : "待检测"));
-        fileTable_->setItem(row, 2, new QTableWidgetItem("等待处理"));
-        fileTable_->setItem(row, 3, new QTableWidgetItem(file));
+            int row = fileTable_->rowCount();
+            fileTable_->insertRow(row);
+            QFileInfo fi(file);
+            fileTable_->setItem(row, 0, new QTableWidgetItem(fi.fileName()));
 
+            int pages = 0;
+            try {
+                PdfDocumentHandle doc = PdfDocument::open(p);
+                pages = PdfDocument::pageCount(doc.get());
+            } catch (...) {}
+
+            fileTable_->setItem(row, 1, new QTableWidgetItem(pages > 0 ? QString::number(pages) : "待检测"));
+            fileTable_->setItem(row, 2, new QTableWidgetItem("等待处理"));
+            fileTable_->setItem(row, 3, new QTableWidgetItem(file));
+        } catch (const std::exception& e) {
+            qWarning() << "Failed to add dropped file:" << file << e.what();
+        } catch (...) {
+            qWarning() << "Unknown error adding dropped file:" << file;
+        }
     }
-
     if (wasEmpty && fileTable_->rowCount() > 0) {
         fileTable_->selectRow(0);
     }
@@ -589,15 +604,17 @@ std::vector<TaskManager::FileSubtask> MainWindow::buildAllConfigs(bool onlySelec
             // Only process the currently selected file
             if (r != fileTable_->currentRow()) continue;
         }
-        QString filePath = fileTable_->item(r, 3)->text();
-        fs::path p = filePath.toStdString();
+        QTableWidgetItem* pathItem = fileTable_->item(r, 3);
+        if (!pathItem) continue;
+        QString filePath = pathItem->text();
+        if (filePath.isEmpty()) continue;
+        fs::path p = qstringToPath(filePath);
 
         auto it = fileWatermarks_.find(filePath);
         if (it == fileWatermarks_.end() || it->second.empty()) {
             continue;
         }
         const auto& lines = it->second;
-
         for (const auto& line : lines) {
             QString trimmed = line.trimmed();
             if (trimmed.isEmpty()) continue;
@@ -648,9 +665,9 @@ void MainWindow::runBatch(bool onlySelected) {
     taskManager_.setSubtasks(subtasks);
     taskManager_.setPerformanceMode(static_cast<PerformanceMode>(perfCombo_->currentData().toInt()));
     if (!outputDirEdit_->text().trimmed().isEmpty()) {
-        taskManager_.setOutputDirectory(outputDirEdit_->text().trimmed().toStdString());
+        taskManager_.setOutputDirectory(qstringToPath(outputDirEdit_->text().trimmed()));
     } else {
-        taskManager_.setOutputDirectory("");
+        taskManager_.setOutputDirectory(fs::path());
     }
 
     updateUiState(true);

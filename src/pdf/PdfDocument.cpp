@@ -5,7 +5,7 @@
 #include <fpdf_edit.h>
 #include <fpdf_save.h>
 #include <fpdf_doc.h>
-#include <cstdio>
+#include <fstream>
 #include <cstring>
 #include <string>
 
@@ -34,15 +34,26 @@ void FpdfPageDeleter::operator()(FPDF_PAGE page) const {
 }
 
 PdfDocumentHandle PdfDocument::open(const fs::path& path, const std::string& password) {
-    // Ensure library is initialized.
     PdfLibrary::initialize();
 
-    std::string pathStr = pathToString(path);
+    // Read file into memory first — bypasses all path-encoding issues on Windows
+    // because std::ifstream(const fs::path&) uses _wfopen internally on MSVC.
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        throw PdfError("Cannot open file: " + pathToString(path));
+    }
+    std::vector<unsigned char> buffer((std::istreambuf_iterator<char>(file)),
+                                       std::istreambuf_iterator<char>());
+    if (buffer.empty()) {
+        throw PdfError("File is empty: " + pathToString(path));
+    }
 
-    FPDF_DOCUMENT doc = FPDF_LoadDocument(pathStr.c_str(), password.empty() ? nullptr : password.c_str());
+    FPDF_DOCUMENT doc = FPDF_LoadMemDocument(buffer.data(),
+                                              static_cast<int>(buffer.size()),
+                                              password.empty() ? nullptr : password.c_str());
     if (!doc) {
         unsigned long err = FPDF_GetLastError();
-        throw PdfError("Failed to open PDF: " + pathStr + " (" + pdfiumError(err) + ")");
+        throw PdfError("Failed to parse PDF: " + pathToString(path) + " (" + pdfiumError(err) + ")");
     }
 
     return PdfDocumentHandle(doc);

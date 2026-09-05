@@ -11,15 +11,22 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
-
+#include <QString>
 namespace pdfmark {
 
 namespace fs = std::filesystem;
+
 inline std::string pathToString(const fs::path& p) {
     auto u8 = p.u8string();
     return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
 }
-
+inline fs::path qstringToPath(const QString& str) {
+#ifdef _WIN32
+    return fs::path(str.toStdWString());
+#else
+    return fs::path(str.toUtf8().toStdString());
+#endif
+}
 
 // Performance modes available in the UI.
 enum class PerformanceMode {
