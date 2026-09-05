@@ -1,0 +1,63 @@
+name: Windows CI Build
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Ninja
+        uses: ashutoshvarma/setup-ninja@master
+        with:
+          version: 1.11.1
+
+      - name: Setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Qt 6
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.6.3'
+          host: 'windows'
+          target: 'desktop'
+          arch: 'win64_msvc2019_64'
+          modules: 'qtbase'
+          cache: true
+
+      - name: Configure CMake
+        run: |
+          cmake -B build -G "Ninja" `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_PREFIX_PATH="${{ env.QT_ROOT }}" `
+            -DBUILD_TESTS=ON
+
+      - name: Build PDFMark and Tests
+        run: |
+          cmake --build build --config Release
+
+      - name: Run Unit and Visual Tests
+        run: |
+          ctest --test-dir build --output-on-failure -C Release
+
+      - name: Package Windows Portable Release
+        shell: pwsh
+        run: |
+          .\scripts\package-windows.ps1 -BuildDir build -OutputDir dist -QtDir "${{ env.QT_ROOT }}"
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PDFMark-Windows-x64
+          path: dist/PDFMark-Windows-x64.zip
+          retention-days: 14

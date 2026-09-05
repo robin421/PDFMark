@@ -1,0 +1,83 @@
+name: Release Multi-Platform
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    strategy:
+      matrix:
+        include:
+          - os: windows-2022
+            platform: windows-x64
+            artifact_name: PDFMark-Windows-x64.zip
+          - os: macos-14
+            platform: macos-arm64
+            artifact_name: PDFMark-macOS-arm64.zip
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Windows specific setup
+      - name: Setup MSVC environment (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Qt 6 (Windows)
+        if: runner.os == 'Windows'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.6.3'
+          host: 'windows'
+          target: 'desktop'
+          arch: 'win64_msvc2019_64'
+          modules: 'qtbase'
+
+      # macOS specific setup
+      - name: Install Qt 6 (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install qt@6
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix qt@6)" >> $GITHUB_ENV
+
+      - name: Configure CMake
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --config Release -j
+
+      - name: Run Tests
+        run: ctest --test-dir build --output-on-failure -C Release
+
+      - name: Package Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          .\scripts\package-windows.ps1 -BuildDir build -OutputDir dist -QtDir "${{ env.QT_ROOT }}"
+
+      - name: Package macOS
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p dist/PDFMark-macOS
+          cp build/PdfMark dist/PDFMark-macOS/
+          cp build/libpdfium.dylib dist/PDFMark-macOS/ 2>/dev/null || true
+          cp README.md dist/PDFMark-macOS/
+          cd dist && zip -r PDFMark-macOS-arm64.zip PDFMark-macOS
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: dist/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,101 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g. v1.0.0)'
+        required: false
+        type: string
+
+jobs:
+  build-windows:
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: windows-2022
+
+    outputs:
+      version: ${{ steps.version.outputs.ver }}
+      tag: ${{ steps.version.outputs.tag }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.version }}" != "" ]]; then
+            echo "tag=v${{ inputs.version }}"
+            echo "ver=${{ inputs.version }}"
+          else
+            TAG=${GITHUB_REF#refs/tags/}
+            echo "tag=$TAG"
+            echo "ver=${TAG#v}"
+          fi
+
+      - name: Check existing release
+        id: check_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view ${{ steps.version.outputs.tag }} --json id --jq .id 2>/dev/null; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Setup Ninja
+        if: steps.check_release.outputs.exists == 'false'
+        uses: ashutoshvarma/setup-ninja@master
+        with:
+          version: 1.11.1
+
+      - name: Setup MSVC environment
+        if: steps.check_release.outputs.exists == 'false'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Qt 6
+        if: steps.check_release.outputs.exists == 'false'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.6.3'
+          host: 'windows'
+          target: 'desktop'
+          arch: 'win64_msvc2019_64'
+          modules: 'qtbase'
+          cache: true
+
+      - name: Configure CMake
+        if: steps.check_release.outputs.exists == 'false'
+        run: |
+          cmake -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_PREFIX_PATH="${{ env.QT_ROOT }}" `
+            -DBUILD_TESTS=OFF
+
+      - name: Build PDFMark
+        if: steps.check_release.outputs.exists == 'false'
+        run: |
+          cmake --build build --config Release
+
+      - name: Package Windows Portable Release
+        if: steps.check_release.outputs.exists == 'false'
+        shell: pwsh
+        run: |
+          .\scripts\package-windows.ps1 -BuildDir build -OutputDir dist -QtDir "${{ env.QT_ROOT }}"
+
+      - name: Create GitHub Release
+        if: steps.check_release.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create ${{ steps.version.outputs.tag }} \
+            --title "PDFMark ${{ steps.version.outputs.ver }}" \
+            --notes "PDFMark ${{ steps.version.outputs.ver }} — 纯绿色免安装，解压后双击 `PDFMark.exe` 即可使用。\n\n**使用方法：**\n1. 下载下方 `PDFMark-Windows-x64.zip`\n2. 解压到任意目录\n3. 双击 `PDFMark.exe` 启动" \
+            dist/PDFMark-Windows-x64.zip
