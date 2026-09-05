@@ -2,9 +2,8 @@ name: Release Multi-Platform
 
 on:
   push:
-    tags:
-      - 'v*'
-
+    branches: [ main, master ]
+  workflow_dispatch:
 jobs:
   build-and-release:
     strategy:
