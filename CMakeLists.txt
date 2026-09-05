@@ -21,7 +21,20 @@ find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Test)
 # Find or setup PDFium
 set(PDFIUM_VERSION "8035")
 set(LOCAL_PDFIUM "${CMAKE_CURRENT_SOURCE_DIR}/third_party/pdfium")
+# Determine whether the platform-specific pdfium binary actually exists locally.
+# The repository ships only the macOS dylib; on Windows/Linux we must download.
+set(LOCAL_PDFIUM_OK FALSE)
 if(EXISTS "${LOCAL_PDFIUM}/PDFiumConfig.cmake")
+    if(WIN32 AND EXISTS "${LOCAL_PDFIUM}/lib/pdfium.dll.lib" AND EXISTS "${LOCAL_PDFIUM}/bin/pdfium.dll")
+        set(LOCAL_PDFIUM_OK TRUE)
+    elseif(APPLE AND EXISTS "${LOCAL_PDFIUM}/lib/libpdfium.dylib")
+        set(LOCAL_PDFIUM_OK TRUE)
+    elseif(NOT WIN32 AND NOT APPLE AND EXISTS "${LOCAL_PDFIUM}/lib/libpdfium.so")
+        set(LOCAL_PDFIUM_OK TRUE)
+    endif()
+endif()
+
+if(LOCAL_PDFIUM_OK)
     set(PDFium_DIR "${LOCAL_PDFIUM}" CACHE PATH "Path to PDFium" FORCE)
     list(APPEND CMAKE_PREFIX_PATH "${LOCAL_PDFIUM}")
 else()
