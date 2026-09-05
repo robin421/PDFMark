@@ -100,14 +100,63 @@ if ($pdfiumPath) {
 }
 
 # 5. Run windeployqt
+#     Pass --no-compiler-runtime so windeployqt does NOT drop the giant
+#     vc_redist.x64.exe installer into the package.  That installer prompted
+#     users to restart Windows after "installing" PDFMark.  PDFMark is meant to
+#     be a portable, no-install application.
 Write-Host "[4/5] Deploying Qt dependencies..." -ForegroundColor Yellow
 $deployTarget = Join-Path $packageDir "PdfMark.exe"
-& $windeployqt --release --no-translations --compiler-runtime --no-opengl-sw $deployTarget
+& $windeployqt --release --no-translations --no-compiler-runtime --no-opengl-sw $deployTarget
 
 if ($LASTEXITCODE -ne 0) {
     Write-Error "windeployqt failed with exit code $LASTEXITCODE"
     exit $LASTEXITCODE
 }
+
+# 5b. Remove any installer that windeployqt may have left behind.
+foreach ($banned in @('vc_redist.x64.exe', 'vc_redist.x86.exe', 'vc_redist_arm64.exe')) {
+    $bannedPath = Join-Path $packageDir $banned
+    if (Test-Path $bannedPath) {
+        Remove-Item -Force $bannedPath
+        Write-Host "  removed installer-style runtime: $banned" -ForegroundColor DarkYellow
+    }
+}
+
+# 5c. Ship MSVC runtime DLLs flat next to PdfMark.exe so the user never has to
+#     install or restart anything.
+$runtimeDlls = @(
+    'msvcp140.dll',
+    'msvcp140_1.dll',
+    'msvcp140_2.dll',
+    'msvcp140_atomic_wait.dll',
+    'msvcp140_codecvt_ids.dll',
+    'vcruntime140.dll',
+    'vcruntime140_1.dll',
+    'vcruntime140_threading.dll',
+    'concrt140.dll'
+)
+
+$crtSearchRoots = @()
+$vsCrt = Get-ChildItem -Path 'C:\Program Files\Microsoft Visual Studio', 'C:\Program Files (x86)\Microsoft Visual Studio' -Recurse -Directory -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -eq 'Microsoft.VC143.CRT' -or $_.Name -eq 'Microsoft.VC140.CRT' } |
+    Select-Object -ExpandProperty FullName
+if ($vsCrt) { $crtSearchRoots += $vsCrt }
+$crtSearchRoots += 'C:\Windows\System32'
+
+foreach ($dll in $runtimeDlls) {
+    $dllPath = $null
+    foreach ($root in $crtSearchRoots) {
+        $candidate = Join-Path $root $dll
+        if (Test-Path $candidate) {
+            $dllPath = $candidate
+            break
+        }
+    }
+    if ($dllPath) {
+        Copy-Item -Force $dllPath -Destination $packageDir
+    }
+}
+Write-Host "  embedded MSVC runtime DLLs flat next to PdfMark.exe (no installer, no reboot)" -ForegroundColor Green
 
 # 6. Copy License and Readme if present
 if (Test-Path "README.md") {

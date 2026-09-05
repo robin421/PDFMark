@@ -22,9 +22,8 @@
 | 🎨 **可调水印参数** | 文字、字号、透明度、旋转角度、错位排布、边界外扩防留白 |
 | 🔐 **密码保护 PDF** | 加密输入自动弹窗输入口令；已知口令自动复用 |
 | 🧵 **多模式并发** | 低 / 标准 / 极速三档，按机器资源自动分配线程数 |
-| 🧪 **自动化测试** | 5 个单元与视觉回归测试，CI 全绿 |
-
-## 构建
+| 📦 **绿色免安装** | 解压后双击 `PdfMark.exe` 直接运行，不写注册表，无安装包，绝无需重启系统 |
+| 🧪 **自动化测试** | 6 个单元与视觉回归测试，CI 全绿 |
 
 ### 通用前置依赖
 
@@ -70,11 +69,13 @@ ctest --test-dir build --output-on-failure
 .\scripts\package-windows.ps1 -BuildDir build -OutputDir dist -QtDir "C:/Qt/6.6.3/msvc2019_64"
 ```
 
-产物：`dist/PDFMark-Windows-x64.zip`（含 PdfMark.exe、pdfium.dll、所有 Qt 运行时，可双击运行）。
+产物：`dist/PDFMark-Windows-x64.zip`（含所有依赖，完全免安装，无需管理员权限，解压即用）。
 
 ## 使用方法
 
-1. 启动 `PdfMark`（macOS：`./build/PdfMark`；Windows：解压后双击 `PdfMark.exe`）。
+1. 启动 `PdfMark`：
+   - **macOS**：双击 `./build/PdfMark.app`。
+   - **Windows**：解压 `PDFMark-Windows-x64.zip` 后**直接双击 `PdfMark.exe`** 即可使用（**绿色免安装版，切勿寻找或安装任何安装包，无需重启计算机**）。
 2. 拖拽 PDF 文件/文件夹到主窗口，或点击「添加 PDF 文件...」。
 3. 调整水印参数：
    - **文字**、**字号**、**透明度**（1–100%）、**旋转角度**（默认 -35°）
