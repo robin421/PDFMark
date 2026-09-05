@@ -1,4 +1,6 @@
 // PDFMark - PdfRenderer implementation.
+#define NOMINMAX  // Prevent Windows macros from polluting std::min/std::max
+
 #include "pdf/PdfRenderer.h"
 #include "pdf/PdfDocument.h"
 #include "pdf/PdfLibrary.h"
@@ -22,8 +24,8 @@ QImage PdfRenderer::rasterizePage(FPDF_PAGE page, int dpi) {
         throw PdfError("Invalid page dimensions");
     }
 
-    int widthPx = std::max(1, static_cast<int>(std::round(widthPt * dpi / 72.0)));
-    int heightPx = std::max(1, static_cast<int>(std::round(heightPt * dpi / 72.0)));
+    int widthPx = (std::max)(1, static_cast<int>(std::round(widthPt * dpi / 72.0)));
+    int heightPx = (std::max)(1, static_cast<int>(std::round(heightPt * dpi / 72.0)));
 
     // Create 32-bit BGRx bitmap (alpha = 0: no alpha channel, 4 bytes per pixel)
     FPDF_BITMAP bitmap = FPDFBitmap_Create(widthPx, heightPx, 0);
