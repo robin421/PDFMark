@@ -117,10 +117,12 @@ elseif(WIN32)
     list(APPEND APP_SRCS ${APP_ICON_RC})
 endif()
 
-# Main Executable - macOS gets a proper .app bundle
+# Main Executable - macOS gets a proper .app bundle, Windows gets a GUI application (no console)
 add_executable(PdfMark ${APP_SRCS})
-set_target_properties(PdfMark PROPERTIES MACOSX_BUNDLE TRUE)
-
+set_target_properties(PdfMark PROPERTIES
+    MACOSX_BUNDLE TRUE
+    WIN32_EXECUTABLE TRUE
+)
 if(APPLE)
     set_target_properties(PdfMark PROPERTIES
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/cmake/MacOSXBundleInfo.plist.in"
@@ -137,7 +139,7 @@ target_link_libraries(PdfMark PRIVATE
     pdfmark_core
 )
 if(WIN32)
-    target_link_libraries(PdfMark PRIVATE dbghelp)
+    target_link_libraries(PdfMark PRIVATE dbghelp Qt6::EntryPoint)
 endif()
 
 # Fix macOS RPATH for PDFium dynamic library
