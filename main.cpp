@@ -16,6 +16,8 @@
 #include <QStandardPaths>
 #include <QDateTime>
 #include <QMessageLogContext>
+#include <QJsonDocument>
+#include <QJsonObject>
 
 namespace {
 #ifdef _WIN32
