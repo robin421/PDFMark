@@ -230,6 +230,35 @@ void testMultiWatermarkBatch() {
             assert(PdfDocument::pageCount(docRef.first.get()) == 1);
         }
     }
+    // ── Advanced: Cancellation during multi-batch ──
+    std::cout << "[RUN] testMultiWatermarkBatch (cancellation)\n";
+    fs::path workDir3 = workDir.parent_path() / "multi_wm_e2e_cancel";
+    fs::remove_all(workDir3, ec);
+    fs::create_directories(workDir3);
+    fs::path cancelInput = workDir3 / "cancel_doc.pdf";
+    createTestPdf(cancelInput);
+
+    TaskManager mgr3;
+    mgr3.setWatermarkConfigs(configs2);
+    mgr3.setOutputDirectory(workDir3);
+    mgr3.addFile(cancelInput);
+
+    bool cancelFinishedFired = false;
+    QObject::connect(&mgr3, &TaskManager::allFinished,
+                     [&cancelFinishedFired](const std::vector<FileResult>&) {
+                         cancelFinishedFired = true;
+                     });
+    mgr3.start();
+    mgr3.cancel(); // immediately cancel
+
+    auto deadline3 = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while ((mgr3.isRunning() || !cancelFinishedFired) && std::chrono::steady_clock::now() < deadline3) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    assert(!mgr3.isRunning());
+    assert(cancelFinishedFired);
+    fs::remove_all(workDir3, ec);
+
     fs::remove_all(workDir2, ec);
     fs::remove_all(workDir, ec);
     std::cout << "[PASS] testMultiWatermarkBatch\n";

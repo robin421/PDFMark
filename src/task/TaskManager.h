@@ -58,14 +58,35 @@ signals:
     void passwordRequired(const QString& filePath);
 
 private:
-    // Internal per-file processing (executed in worker thread).
+    struct FileTaskItem {
+        fs::path input;
+        fs::path output;
+        WatermarkConfig config;
+        int subtaskIndex = 0;
+        QString displayName;
+    };
+
+    struct DocumentBatchJob {
+        fs::path input;
+        std::vector<FileTaskItem> tasks;
+        int pageCount = 0;
+    };
+
+    // Internal per-document batch processing (processes 1 source PDF with N watermarks,
+    // rasterizing each page only once and sharing base pixels across all target watermarks).
+    void processDocumentBatch(const DocumentBatchJob& docJob,
+                              int totalSubtasks,
+                              std::shared_ptr<std::atomic<int>> completedUnits,
+                              int totalUnits,
+                              std::shared_ptr<std::atomic<int>> lastReportedPct);
+
+    // Legacy single-file helper retained for backward compatibility.
     FileResult processSingleFile(const fs::path& input,
                                  const fs::path& output,
                                  const WatermarkConfig& config,
                                  std::function<void(int,int)> pageCallback);
 
     fs::path outputPathFor(const fs::path& input, const std::string& watermarkText = "", int duplicateIndex = 0) const;
-
     mutable std::mutex mutex_;
     WatermarkConfig config_;
     std::vector<WatermarkConfig> configs_;

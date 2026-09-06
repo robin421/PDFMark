@@ -10,11 +10,13 @@
 #include <QFileInfo>
 #include <QDir>
 #include <QTimer>
+#include <QRunnable>
 #include <iostream>
 #include <atomic>
 #include <chrono>
 #include <unordered_set>
-
+#include <memory>
+#include <condition_variable>
 #ifdef _WIN32
 #include <windows.h>
 #include <process.h>
@@ -285,6 +287,199 @@ FileResult TaskManager::processSingleFile(const fs::path& input,
     return result;
 }
 
+void TaskManager::processDocumentBatch(const DocumentBatchJob& docJob,
+                                       int totalSubtasks,
+                                       std::shared_ptr<std::atomic<int>> completedUnits,
+                                       int totalUnits,
+                                       std::shared_ptr<std::atomic<int>> lastReportedPct) {
+    if (docJob.tasks.empty()) return;
+
+    // Emit fileStarted for all tasks in this document batch
+    for (const auto& task : docJob.tasks) {
+        emit fileStarted(task.displayName, task.subtaskIndex + 1, totalSubtasks);
+    }
+
+    if (cancelRequested_.load()) {
+        for (const auto& task : docJob.tasks) {
+            FileResult res;
+            res.inputPath = task.input;
+            res.outputPath = task.output;
+            res.watermarkText = task.config.text;
+            res.success = false;
+            res.errorMessage = "Operation cancelled";
+            {
+                std::lock_guard<std::mutex> lk(mutex_);
+                results_[task.subtaskIndex] = res;
+            }
+            emit fileFinished(res);
+        }
+        return;
+    }
+
+    std::string password;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = passwords_.find(pathToString(docJob.input));
+        if (it != passwords_.end()) password = it->second;
+    }
+
+    struct OutputContext {
+        const FileTaskItem* task = nullptr;
+        fs::path tempOutput;
+        PdfDocumentHandle dstDoc;
+        WatermarkRenderer::Stamp stamp;
+        double elapsedMs = 0.0;
+        std::unique_ptr<ScopedTimer> timer;
+    };
+
+    std::vector<OutputContext> contexts(docJob.tasks.size());
+    for (size_t k = 0; k < docJob.tasks.size(); ++k) {
+        contexts[k].task = &docJob.tasks[k];
+        uint64_t uid = getUniqueTempId();
+        contexts[k].tempOutput = docJob.tasks[k].output.parent_path() / stringToPath(
+            "~" + pathToString(docJob.tasks[k].output.filename()) + "." + std::to_string(uid) + ".tmp");
+        contexts[k].timer = std::make_unique<ScopedTimer>(contexts[k].elapsedMs);
+        contexts[k].dstDoc = PdfDocument::create();
+        contexts[k].stamp = WatermarkRenderer::createStamp(docJob.tasks[k].config);
+
+        std::error_code ecMkdir;
+        fs::create_directories(docJob.tasks[k].output.parent_path(), ecMkdir);
+    }
+
+    PdfDocumentRef srcDocRef;
+    int totalPages = 0;
+    try {
+        srcDocRef = PdfDocument::open(docJob.input, password);
+        totalPages = PdfDocument::pageCount(srcDocRef.first.get());
+        if (totalPages <= 0) {
+            throw PdfError("PDF has no pages: " + pathToString(docJob.input));
+        }
+    } catch (const std::exception& e) {
+        for (auto& ctx : contexts) {
+            ctx.timer.reset();
+            FileResult res;
+            res.inputPath = ctx.task->input;
+            res.outputPath = ctx.task->output;
+            res.watermarkText = ctx.task->config.text;
+            res.success = false;
+            res.errorMessage = e.what();
+            res.elapsedMs = ctx.elapsedMs;
+            {
+                std::lock_guard<std::mutex> lk(mutex_);
+                results_[ctx.task->subtaskIndex] = res;
+            }
+            emit fileFinished(res);
+        }
+        return;
+    }
+
+    bool batchOk = true;
+    std::string batchError;
+
+    for (int pageIdx = 0; pageIdx < totalPages; ++pageIdx) {
+        if (cancelRequested_.load()) {
+            batchOk = false;
+            batchError = "Operation cancelled by user";
+            break;
+        }
+
+        try {
+            PdfPageHandle srcPage = PdfDocument::loadPage(srcDocRef.first.get(), pageIdx);
+            double widthPt = PdfDocument::getPageWidth(srcPage.get());
+            double heightPt = PdfDocument::getPageHeight(srcPage.get());
+
+            // Single rasterization per page shared across all watermarks
+            int baseDpi = contexts[0].task->config.dpi;
+            QImage baseImage = PdfRenderer::rasterizePage(srcPage.get(), baseDpi);
+
+            for (size_t k = 0; k < contexts.size(); ++k) {
+                QImage pageImg;
+                if (contexts[k].task->config.dpi == baseDpi) {
+                    if (k == contexts.size() - 1) {
+                        pageImg = std::move(baseImage);
+                    } else {
+                        pageImg = baseImage.copy();
+                    }
+                } else {
+                    pageImg = PdfRenderer::rasterizePage(srcPage.get(), contexts[k].task->config.dpi);
+                }
+
+                WatermarkRenderer::applyWatermark(pageImg, contexts[k].task->config, contexts[k].stamp);
+                PdfWriter::appendRasterPage(contexts[k].dstDoc.get(), pageImg, widthPt, heightPt, contexts[k].task->config.jpegQuality);
+            }
+        } catch (const std::exception& e) {
+            batchOk = false;
+            batchError = e.what();
+            break;
+        } catch (...) {
+            batchOk = false;
+            batchError = "Unknown error during page processing";
+            break;
+        }
+
+        // Atomically update progress units and smoothly throttle emission
+        int unitsDone = completedUnits->fetch_add(static_cast<int>(contexts.size())) + static_cast<int>(contexts.size());
+        int pct = totalUnits > 0 ? (unitsDone * 100 / totalUnits) : 0;
+        if (pct > 100) pct = 100;
+        int prev = lastReportedPct->load(std::memory_order_relaxed);
+        while (pct > prev && !lastReportedPct->compare_exchange_weak(prev, pct)) {
+            // monotonic lock-free CAS
+        }
+        if (pct > prev) {
+            emit fileProgress(pct, 100);
+        }
+        emit pageProgress(contexts[0].task->displayName, pageIdx + 1, totalPages);
+    }
+
+    // Save outputs to temporary paths and atomically rename
+    for (auto& ctx : contexts) {
+        ctx.timer.reset();
+        FileResult res;
+        res.inputPath = ctx.task->input;
+        res.outputPath = ctx.task->output;
+        res.watermarkText = ctx.task->config.text;
+        res.totalPages = totalPages;
+        res.elapsedMs = ctx.elapsedMs;
+
+        if (!batchOk) {
+            res.success = false;
+            res.errorMessage = batchError;
+            std::error_code ec;
+            fs::remove(ctx.tempOutput, ec);
+        } else {
+            try {
+                PdfDocument::save(ctx.dstDoc.get(), ctx.tempOutput);
+                std::error_code ecRename;
+                fs::rename(ctx.tempOutput, ctx.task->output, ecRename);
+                if (ecRename) {
+                    std::error_code ecCopy;
+                    fs::copy_file(ctx.tempOutput, ctx.task->output, fs::copy_options::overwrite_existing, ecCopy);
+                    if (ecCopy) {
+                        std::error_code ecRm;
+                        fs::remove(ctx.tempOutput, ecRm);
+                        throw PdfError("Failed to save output file: rename (" + ecRename.message() +
+                                       "), copy (" + ecCopy.message() + ")");
+                    }
+                    std::error_code ecRm;
+                    fs::remove(ctx.tempOutput, ecRm);
+                }
+                res.success = true;
+            } catch (const std::exception& e) {
+                res.success = false;
+                res.errorMessage = e.what();
+                std::error_code ec;
+                fs::remove(ctx.tempOutput, ec);
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lk(mutex_);
+            results_[ctx.task->subtaskIndex] = res;
+        }
+        emit fileFinished(res);
+    }
+}
+
 void TaskManager::start() {
     if (running_.exchange(true)) {
         return; // Already running
@@ -318,15 +513,8 @@ void TaskManager::start() {
     }
 
     // Pre-assign collision-free output paths
-    struct SubtaskJob {
-        fs::path input;
-        fs::path output;
-        WatermarkConfig config;
-        int index = 0;
-    };
-
-    std::vector<SubtaskJob> jobs;
-    jobs.reserve(activeSubtasks.size());
+    std::vector<FileTaskItem> allTasks;
+    allTasks.reserve(activeSubtasks.size());
 
     std::unordered_set<std::string> usedOutputPaths;
     for (size_t i = 0; i < activeSubtasks.size(); ++i) {
@@ -338,99 +526,105 @@ void TaskManager::start() {
             out = outputPathFor(st.input, st.config.text, dupIdx);
         }
         usedOutputPaths.insert(pathToString(out));
-        jobs.push_back({st.input, out, st.config, static_cast<int>(i + 1)});
+
+        QString fileName = QString::fromUtf8(pathToString(st.input.filename()).c_str());
+        QString displayName = QString("%1 [%2]")
+            .arg(fileName)
+            .arg(QString::fromUtf8(st.config.text.c_str()));
+
+        allTasks.push_back({st.input, out, st.config, static_cast<int>(i), displayName});
     }
 
-
-    // Pre-count pages per job (on the caller thread, before worker starts).
-    std::vector<int> jobPageCounts(jobs.size(), 0);
-    for (size_t i = 0; i < jobs.size(); ++i) {
-        try {
-            auto srcDocRef = PdfDocument::open(jobs[i].input);
-            jobPageCounts[i] = PdfDocument::pageCount(srcDocRef.first.get());
-        } catch (...) {
-            jobPageCounts[i] = 1; // Fallback to 1 page if unable to read count.
+    // Group tasks by source document to batch rasterization
+    std::vector<DocumentBatchJob> docJobs;
+    std::unordered_map<std::string, size_t> inputToJobIdx;
+    for (const auto& task : allTasks) {
+        std::string key = pathToString(task.input);
+        auto it = inputToJobIdx.find(key);
+        if (it == inputToJobIdx.end()) {
+            inputToJobIdx[key] = docJobs.size();
+            DocumentBatchJob dj;
+            dj.input = task.input;
+            dj.tasks.push_back(task);
+            docJobs.push_back(std::move(dj));
+        } else {
+            docJobs[it->second].tasks.push_back(task);
         }
     }
-    int totalPageCount = 0;
-    for (int pc : jobPageCounts) { totalPageCount += pc; }
-    // Single-worker serial execution: tasks run one-by-one on a dedicated thread,
-    // eliminating all cross-worker signal races (progress bars no longer jump).
-    QThread* workerThread = QThread::create([this, jobs, jobPageCounts, totalPageCount]() {
-        int totalSubtasks = static_cast<int>(jobs.size());
-        for (int idx = 0; idx < totalSubtasks; ++idx) {
+
+    // Pre-count total page units for strictly monotonic progress reporting
+    int totalUnits = 0;
+    for (auto& dj : docJobs) {
+        try {
+            auto srcDocRef = PdfDocument::open(dj.input);
+            dj.pageCount = PdfDocument::pageCount(srcDocRef.first.get());
+        } catch (...) {
+            dj.pageCount = 1;
+        }
+        totalUnits += dj.pageCount * static_cast<int>(dj.tasks.size());
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        results_.assign(allTasks.size(), FileResult{});
+    }
+
+    auto completedUnits = std::make_shared<std::atomic<int>>(0);
+    auto lastReportedPct = std::make_shared<std::atomic<int>>(0);
+
+    int maxWorkers = WorkerPool::idealWorkerCount(perfMode_);
+    pool_->setMaxThreadCount(maxWorkers);
+
+    QThread* supervisorThread = QThread::create([this, docJobs, totalSubtasks, completedUnits, totalUnits, lastReportedPct]() {
+        struct SyncState {
+            std::mutex mtx;
+            std::condition_variable cv;
+            int remaining = 0;
+        };
+        auto sync = std::make_shared<SyncState>();
+        sync->remaining = static_cast<int>(docJobs.size());
+
+        for (const auto& dj : docJobs) {
             if (cancelRequested_.load()) {
-                // Emit cancelled results for all remaining tasks.
-                for (int k = idx; k < totalSubtasks; ++k) {
+                for (const auto& task : dj.tasks) {
                     FileResult res;
-                    res.inputPath = jobs[k].input;
-                    res.outputPath = jobs[k].output;
-                    res.watermarkText = jobs[k].config.text;
+                    res.inputPath = task.input;
+                    res.outputPath = task.output;
+                    res.watermarkText = task.config.text;
                     res.success = false;
                     res.errorMessage = "Operation cancelled";
                     {
                         std::lock_guard<std::mutex> lk(mutex_);
-                        results_.push_back(res);
+                        results_[task.subtaskIndex] = res;
                     }
                     emit fileFinished(res);
-                    // Emit page-grain total progress so the bar stays monotonic.
-                    int completedPages = 0;
-                    for (int t = 0; t < idx; ++t) {
-                        completedPages += jobPageCounts[t];
-                    }
-                    int pct = totalPageCount > 0 ? (completedPages * 100 / totalPageCount) : 0;
-                    emit fileProgress(pct, 100);
                 }
                 {
-                    std::lock_guard<std::mutex> lk(mutex_);
-                    std::vector<FileResult> fin = results_;
-                    running_.store(false);
-                    emit allFinished(fin);
+                    std::lock_guard<std::mutex> lk(sync->mtx);
+                    sync->remaining--;
+                    if (sync->remaining == 0) {
+                        sync->cv.notify_one();
+                    }
                 }
-                return;
+                continue;
             }
 
-            const auto& job = jobs[idx];
-            QString fileName = QString::fromUtf8(pathToString(job.input.filename()).c_str());
-            QString displayName = QString("%1 [%2]")
-                .arg(fileName)
-                .arg(QString::fromUtf8(job.config.text.c_str()));
-            emit fileStarted(displayName, idx + 1, totalSubtasks);
+            pool_->start(QRunnable::create([this, dj, totalSubtasks, completedUnits, totalUnits, lastReportedPct, sync]() {
+                processDocumentBatch(dj, totalSubtasks, completedUnits, totalUnits, lastReportedPct);
+                {
+                    std::lock_guard<std::mutex> lk(sync->mtx);
+                    sync->remaining--;
+                    if (sync->remaining == 0) {
+                        sync->cv.notify_one();
+                    }
+                }
+            }));
+        }
 
-            // Page-grain progress: emits both page-level (for current file) and
-            // page-grain total (for totalProgressBar_). total is strictly monotonic.
-            auto pageCb = [this, displayName, idx, jobPageCounts, totalPageCount](int cur, int tot) {
-                int completedPages = 0;
-                for (int t = 0; t < idx; ++t) { completedPages += jobPageCounts[t]; }
-                completedPages += cur;
-                int pct = totalPageCount > 0 ? (completedPages * 100 / totalPageCount) : 0;
-                emit pageProgress(displayName, cur, tot);
-                emit fileProgress(pct, 100);
-            };
-
-            FileResult res;
-            try {
-                res = processSingleFile(job.input, job.output, job.config, pageCb);
-            } catch (const std::exception& e) {
-                res.inputPath = job.input;
-                res.outputPath = job.output;
-                res.watermarkText = job.config.text;
-                res.success = false;
-                res.errorMessage = e.what();
-                qCritical() << "Error processing file" << displayName << ":" << e.what();
-            } catch (...) {
-                res.inputPath = job.input;
-                res.outputPath = job.output;
-                res.watermarkText = job.config.text;
-                res.success = false;
-                res.errorMessage = "Unknown error during processing";
-                qCritical() << "Unknown error processing file" << displayName;
-            }
-            {
-                std::lock_guard<std::mutex> lk(mutex_);
-                results_.push_back(res);
-            }
-            emit fileFinished(res);
+        // Wait for all worker batches to finish
+        {
+            std::unique_lock<std::mutex> lk(sync->mtx);
+            sync->cv.wait(lk, [&]() { return sync->remaining == 0; });
         }
 
         std::vector<FileResult> fin;
@@ -442,8 +636,8 @@ void TaskManager::start() {
         emit allFinished(fin);
     });
 
-    workerThread->start();
-    connect(workerThread, &QThread::finished, workerThread, &QThread::deleteLater);
+    supervisorThread->start();
+    connect(supervisorThread, &QThread::finished, supervisorThread, &QThread::deleteLater);
 }
 
 } // namespace pdfmark

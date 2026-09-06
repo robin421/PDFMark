@@ -1,4 +1,4 @@
-// PDFMark - PdfRenderer implementation.
+// PDFMark - Page rasterization to QImage using PDFium.
 #define NOMINMAX  // Prevent Windows macros from polluting std::min/std::max
 
 #include "pdf/PdfRenderer.h"
@@ -40,55 +40,40 @@ QImage PdfRenderer::rasterizePage(FPDF_PAGE page, int dpi) {
                        " pixels (limit: 10000px per dimension)");
     }
 
-    // Guard bitmap creation in a nested try-catch
-    FPDF_BITMAP bitmap = nullptr;
-    try {
-        bitmap = FPDFBitmap_Create(widthPx, heightPx, 0);
-    } catch (...) {
-        throw PdfError("FPDFBitmap_Create threw an exception");
+    // Create a QImage that owns its pixel memory — the buffer is pre-allocated
+    // by QImage itself and reused across pages on the same thread.
+    QImage image(widthPx, heightPx, QImage::Format_RGB32);
+    if (image.isNull()) {
+        throw PdfError("Failed to allocate QImage of size " +
+                       std::to_string(widthPx) + "x" + std::to_string(heightPx));
     }
 
+    // FPDFBitmap wraps the QImage's pixel buffer directly (external buffer mode).
+    // This avoids allocating/deallocating a separate ~35 MB FPDF_BITMAP heap buffer
+    // on every page, which eliminates Windows heap allocator lock contention and
+    // reduces page-fault pressure significantly.
+    FPDF_BITMAP bitmap = FPDFBitmap_CreateEx(widthPx, heightPx,
+                                             FPDFBitmap_BGRx, // matches QImage::Format_RGB32 on little-endian
+                                             image.bits(),
+                                             image.bytesPerLine());
     if (!bitmap) {
-        throw PdfError("Failed to allocate FPDF_BITMAP of size " +
+        throw PdfError("FPDFBitmap_CreateEx failed for " +
                        std::to_string(widthPx) + "x" + std::to_string(heightPx));
     }
 
     try {
-        // Fill background with white
         FPDFBitmap_FillRect(bitmap, 0, 0, widthPx, heightPx, 0xFFFFFFFF);
-
-        // Render page — this is where pdfium crashes on malformed XFA/forms
         FPDF_RenderPageBitmap(bitmap, page, 0, 0, widthPx, heightPx, 0, FPDF_ANNOT);
-
-        // Read pixel buffer
-        void* buffer = FPDFBitmap_GetBuffer(bitmap);
-        int stride = FPDFBitmap_GetStride(bitmap);
-
-        if (!buffer || stride <= 0) {
-            throw PdfError("FPDFBitmap_GetBuffer returned null or invalid stride");
-        }
-
-        // Hand over ownership of FPDF_BITMAP buffer directly to QImage without deep copying.
-        // The cleanup callback automatically destroys the FPDF_BITMAP when QImage goes out of scope.
-        auto cleanup = [](void* info) {
-            if (info) {
-                FPDFBitmap_Destroy(static_cast<FPDF_BITMAP>(info));
-            }
-        };
-
-        uchar* ubuf = static_cast<uchar*>(buffer);
-        QImage result(ubuf, widthPx, heightPx, stride, QImage::Format_RGB32, cleanup, bitmap);
-
-        if (result.isNull()) {
-            FPDFBitmap_Destroy(bitmap);
-            throw PdfError("Failed to wrap FPDF_BITMAP into QImage");
-        }
-
-        return result;
     } catch (...) {
         FPDFBitmap_Destroy(bitmap);
         throw;
     }
+
+    // Destroy the tiny PDFium struct immediately — the pixel buffer itself
+    // remains owned by the QImage and is not freed by FPDFBitmap_Destroy.
+    FPDFBitmap_Destroy(bitmap);
+
+    return image;
 }
 
 } // namespace pdfmark

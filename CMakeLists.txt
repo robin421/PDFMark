@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(PDFMark VERSION 1.1.1 LANGUAGES CXX C)
+project(PDFMark VERSION 1.1.3 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -99,6 +99,19 @@ if(MSVC)
     add_compile_options(/EHa)
 endif()
 
+# --- Windows / MSVC performance flags (Release builds only) ---
+# CMake's MSVC default is already /O2; we additionally enable full-program
+# optimization (/GL), intrinsic inline expansion (/Oi), function-level linking
+# (/Gy) and AVX2 vectorization (/arch:AVX2) to accelerate image/color work.
+# /GL at compile time pairs with /LTCG at link time (both only in Release to
+# avoid bloating Debug/incremental builds). NOTE: only pdfmark_core exists at
+# this point in the file; PdfMark and the test executables get their flags
+# immediately after their own definitions below.
+if(MSVC)
+    target_compile_options(pdfmark_core PRIVATE
+        "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:/O2;/GL;/Oi;/Gy;/arch:AVX2>")
+endif()
+
 target_include_directories(pdfmark_core PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
@@ -156,6 +169,11 @@ target_link_libraries(PdfMark PRIVATE
 )
 if(WIN32)
     target_link_libraries(PdfMark PRIVATE dbghelp)
+endif()
+if(MSVC)
+    target_compile_options(PdfMark PRIVATE
+        "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:/O2;/GL;/Oi;/Gy;/arch:AVX2>")
+    target_link_options(PdfMark PRIVATE "$<$<CONFIG:Release>:/LTCG;/OPT:REF;/OPT:ICF>")
 endif()
 
 # Fix macOS RPATH for PDFium dynamic library

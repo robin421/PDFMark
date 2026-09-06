@@ -15,6 +15,11 @@ target_link_libraries(pdfmark_tests PRIVATE
     pdfmark_core
     Qt6::Test
 )
+if(MSVC)
+    target_compile_options(pdfmark_tests PRIVATE
+        "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:/O2;/GL;/Oi;/Gy;/arch:AVX2>")
+    target_link_options(pdfmark_tests PRIVATE "$<$<CONFIG:Release>:/LTCG;/OPT:REF;/OPT:ICF>")
+endif()
 
 # Watermark layout test
 add_test(NAME WatermarkTileLayoutTest COMMAND pdfmark_tests --test TileLayout)
@@ -57,5 +62,10 @@ target_link_libraries(pdfmark_updater_test PRIVATE
     pdfmark_core
     Qt6::Test
 )
+if(MSVC)
+    target_compile_options(pdfmark_updater_test PRIVATE
+        "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:/O2;/GL;/Oi;/Gy;/arch:AVX2>")
+    target_link_options(pdfmark_updater_test PRIVATE "$<$<CONFIG:Release>:/LTCG;/OPT:REF;/OPT:ICF>")
+endif()
 add_test(NAME AutoUpdaterTest COMMAND pdfmark_updater_test)
 add_test(NAME MultiWatermarkBatchTest COMMAND pdfmark_tests --test MultiWatermarkBatch)
