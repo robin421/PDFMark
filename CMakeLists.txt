@@ -136,6 +136,9 @@ endif()
 target_link_libraries(PdfMark PRIVATE
     pdfmark_core
 )
+if(WIN32)
+    target_link_libraries(PdfMark PRIVATE dbghelp)
+endif()
 
 # Fix macOS RPATH for PDFium dynamic library
 if(APPLE)

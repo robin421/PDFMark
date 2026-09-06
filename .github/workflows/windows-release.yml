@@ -59,7 +59,7 @@ jobs:
           cmake -B build -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_PREFIX_PATH="${{ env.QT_ROOT }}" `
-            -DBUILD_TESTS=OFF
+            -DBUILD_TESTS=OFF 2>&1
 
       - name: Build PDFMark
         shell: pwsh
