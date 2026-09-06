@@ -12,7 +12,7 @@
 
 #include <QImage>
 #include <QPainter>
-
+#include <QCoreApplication>
 #include <cassert>
 #include <chrono>
 #include <cstdio>
@@ -117,9 +117,11 @@ void testMultiWatermarkBatch() {
 
     // Wait for completion (poll up to 60s).
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
-    while (mgr.isRunning() && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    while ((mgr.isRunning() || allFinishedCount == 0) && std::chrono::steady_clock::now() < deadline) {
+        QCoreApplication::processEvents();
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
+    QCoreApplication::processEvents();
     assert(!mgr.isRunning());
     assert(allFinishedCount == 1);
     assert(fileStartedCount == static_cast<int>(configs.size()));
@@ -193,8 +195,10 @@ void testMultiWatermarkBatch() {
 
     auto deadline2 = std::chrono::steady_clock::now() + std::chrono::seconds(60);
     while (mgr2.isRunning() && std::chrono::steady_clock::now() < deadline2) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        QCoreApplication::processEvents();
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
+    QCoreApplication::processEvents();
     assert(!mgr2.isRunning());
     const auto& results2 = mgr2.results();
     assert(results2.size() == 4); // 2 files × 2 watermarks
