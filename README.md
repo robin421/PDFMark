@@ -83,14 +83,20 @@ ctest --test-dir build --output-on-failure
    - **压缩质量**（JPEG 质量 20–100）
    - **性能模式**：低（单线程）/ 标准 / 极速（全核并发）
 4. 右侧预览面板实时显示 A4 灰度效果。
-5. 点击「开始批量固化」。任务状态在底部进度条实时更新。
-6. 完成后可点击「导出诊断报告」保存性能统计。
+5. 点击「生成所选」或「生成全部」。任务状态在底部进度条实时更新。
 
 ### 输出命名
 
 - 默认输出在源文件同目录，文件名加 `_watermarked.pdf` 后缀。
 - 选择自定义输出目录后，所有文件统一写入该目录。
 
+## 崩溃与日志排查
+
+PDFMark 内置了 Windows 崩溃捕获与诊断日志：
+
+1. **崩溃转储（Minidump）**：如果运行时发生未捕获异常，程序会自动在系统的 `Documents`（我的文档）目录下生成 `PDFMark_crash.dmp`，并弹出提示。
+2. **诊断日志**：程序所有运行日志会自动追加记录至 `%APPDATA%\PDFMark\pdfmark.log`。
+3. **排查与定位**：只需将 `PDFMark_crash.dmp` 与 `pdfmark.log` 提交至 [GitHub Issues](https://github.com/robin421/PDFMark/issues)，即可通过 Visual Studio / WinDbg 100% 精确定位到具体崩溃的函数和行号。
 ## 内存模式验证
 
 `tests/MemoryModelTest.cpp` 模拟连续 100 页 A4@200DPI 处理：

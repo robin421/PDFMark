@@ -133,7 +133,8 @@ $runtimeDlls = @(
     'vcruntime140.dll',
     'vcruntime140_1.dll',
     'vcruntime140_threading.dll',
-    'concrt140.dll'
+    'concrt140.dll',
+    'dbghelp.dll'
 )
 
 $crtSearchRoots = @()
