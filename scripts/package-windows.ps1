@@ -137,12 +137,7 @@ $runtimeDlls = @(
     'dbghelp.dll'
 )
 
-$crtSearchRoots = @()
-$vsCrt = Get-ChildItem -Path 'C:\Program Files\Microsoft Visual Studio', 'C:\Program Files (x86)\Microsoft Visual Studio' -Recurse -Directory -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -eq 'Microsoft.VC143.CRT' -or $_.Name -eq 'Microsoft.VC140.CRT' } |
-    Select-Object -ExpandProperty FullName
-if ($vsCrt) { $crtSearchRoots += $vsCrt }
-$crtSearchRoots += 'C:\Windows\System32'
+$crtSearchRoots = @('C:\Windows\System32')
 
 foreach ($dll in $runtimeDlls) {
     $dllPath = $null
