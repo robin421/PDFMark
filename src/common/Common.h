@@ -36,6 +36,22 @@ inline fs::path stringToPath(const std::string& u8str) {
 #endif
 }
 
+#if defined(_WIN32) && defined(_MSC_VER)
+    // SEH (Structured Exception Handling) guard for Windows.
+    // Converts access violations / SEH exceptions into C++ exceptions
+    // so they can be caught by try/catch(...).
+    #define PDFMARK_SEH_GUARD_BEGIN \
+        __try {
+    #define PDFMARK_SEH_GUARD_END(expr) \
+        } __except(EXCEPTION_EXECUTE_HANDLER) { \
+            throw std::runtime_error("SEH exception (0x" + \
+                std::to_string(GetExceptionCode()) + ") in " + (expr)); \
+        }
+#else
+    #define PDFMARK_SEH_GUARD_BEGIN
+    #define PDFMARK_SEH_GUARD_END(expr)
+#endif
+
 // Performance modes available in the UI.
 enum class PerformanceMode {
     Low,    // 1 worker

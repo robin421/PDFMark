@@ -2,6 +2,7 @@
 #pragma once
 
 #include "../common/Common.h"
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -19,13 +20,29 @@ struct FpdfPageDeleter {
     void operator()(FPDF_PAGE page) const;
 };
 
+// PdfDocumentHandle: unique_ptr that calls FPDF_CloseDocument automatically.
 using PdfDocumentHandle = std::unique_ptr<std::remove_pointer_t<FPDF_DOCUMENT>, FpdfDocumentDeleter>;
 using PdfPageHandle = std::unique_ptr<std::remove_pointer_t<FPDF_PAGE>, FpdfPageDeleter>;
+
+// PdfDocumentPayload: holds the raw PDF byte buffer.
+// PDFium's FPDF_LoadMemDocument does NOT copy the buffer — it requires
+// the caller to keep the buffer alive until the document is closed.
+// Bundling them ensures correct destruction order: document first, buffer last.
+struct PdfDocumentPayload {
+    std::vector<unsigned char> buffer;
+    explicit PdfDocumentPayload(std::vector<unsigned char> buf) : buffer(std::move(buf)) {}
+};
+
+// PdfDocumentRef: (document handle, buffer lifetime owner).
+// Callers that need the raw FPDF_DOCUMENT should use ref.first.get().
+using PdfDocumentRef = std::pair<PdfDocumentHandle, std::shared_ptr<PdfDocumentPayload>>;
 
 class PdfDocument {
 public:
     // Open existing document. Throws PdfError on failure.
-    static PdfDocumentHandle open(const fs::path& path, const std::string& password = "");
+    // Returns a PdfDocumentRef so the underlying memory buffer stays alive
+    // for the entire lifetime of the document handle.
+    static PdfDocumentRef open(const fs::path& path, const std::string& password = "");
 
     // Create a new (empty) document for writing.
     static PdfDocumentHandle create();

@@ -427,8 +427,8 @@ void MainWindow::onAddFiles() {
 
             int pages = 0;
             try {
-                PdfDocumentHandle doc = PdfDocument::open(p);
-                pages = PdfDocument::pageCount(doc.get());
+                auto docRef = PdfDocument::open(p);
+                pages = PdfDocument::pageCount(docRef.first.get());
             } catch (...) {
                 // Might be encrypted or bad format, will show 0 or handle later
             }
@@ -511,8 +511,8 @@ void MainWindow::dropEvent(QDropEvent* event) {
 
             int pages = 0;
             try {
-                PdfDocumentHandle doc = PdfDocument::open(p);
-                pages = PdfDocument::pageCount(doc.get());
+                auto docRef = PdfDocument::open(p);
+                pages = PdfDocument::pageCount(docRef.first.get());
             } catch (...) {}
 
             fileTable_->setItem(row, 1, new QTableWidgetItem(pages > 0 ? QString::number(pages) : "待检测"));

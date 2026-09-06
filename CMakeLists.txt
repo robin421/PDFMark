@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(PDFMark VERSION 1.0.0 LANGUAGES CXX C)
+project(PDFMark VERSION 1.0.9 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -87,6 +87,11 @@ add_library(pdfmark_core STATIC
     src/diagnostics/Diagnostics.h
     src/diagnostics/Diagnostics.cpp
 )
+
+if(MSVC)
+    # /EHa enables SEH exception handling so pdfium crashes become C++ catchable exceptions
+    add_compile_options(/EHa)
+endif()
 
 target_include_directories(pdfmark_core PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src"

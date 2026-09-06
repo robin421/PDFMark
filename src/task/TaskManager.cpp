@@ -171,8 +171,9 @@ FileResult TaskManager::processSingleFile(const fs::path& input,
         // Ensure target subdirectory exists
         fs::create_directories(output.parent_path());
 
-        PdfDocumentHandle srcDoc = PdfDocument::open(input, password);
-        int totalPages = PdfDocument::pageCount(srcDoc.get());
+        PdfDocumentRef srcDocRef = PdfDocument::open(input, password);
+        FPDF_DOCUMENT srcDoc = srcDocRef.first.get();
+        int totalPages = PdfDocument::pageCount(srcDoc);
         result.totalPages = totalPages;
 
         if (totalPages <= 0) {
@@ -186,7 +187,7 @@ FileResult TaskManager::processSingleFile(const fs::path& input,
             }
 
             // Stream single page
-            PdfPageHandle srcPage = PdfDocument::loadPage(srcDoc.get(), i);
+            PdfPageHandle srcPage = PdfDocument::loadPage(srcDoc, i);
             double widthPt = PdfDocument::getPageWidth(srcPage.get());
             double heightPt = PdfDocument::getPageHeight(srcPage.get());
 

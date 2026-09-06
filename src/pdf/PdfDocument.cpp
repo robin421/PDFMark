@@ -33,7 +33,7 @@ void FpdfPageDeleter::operator()(FPDF_PAGE page) const {
     if (page) FPDF_ClosePage(page);
 }
 
-PdfDocumentHandle PdfDocument::open(const fs::path& path, const std::string& password) {
+PdfDocumentRef PdfDocument::open(const fs::path& path, const std::string& password) {
     PdfLibrary::initialize();
 
     // Read file into memory first — bypasses all path-encoding issues on Windows
@@ -42,21 +42,26 @@ PdfDocumentHandle PdfDocument::open(const fs::path& path, const std::string& pas
     if (!file) {
         throw PdfError("Cannot open file: " + pathToString(path));
     }
-    std::vector<unsigned char> buffer((std::istreambuf_iterator<char>(file)),
-                                       std::istreambuf_iterator<char>());
-    if (buffer.empty()) {
+    std::vector<unsigned char> raw((std::istreambuf_iterator<char>(file)),
+                                    std::istreambuf_iterator<char>());
+    if (raw.empty()) {
         throw PdfError("File is empty: " + pathToString(path));
     }
 
-    FPDF_DOCUMENT doc = FPDF_LoadMemDocument(buffer.data(),
-                                              static_cast<int>(buffer.size()),
+    auto payload = std::make_shared<PdfDocumentPayload>(std::move(raw));
+
+    // FPDF_LoadMemDocument does NOT copy the buffer.  The buffer inside
+    // payload must remain valid and unmodified for the entire lifetime of the
+    // document handle.
+    FPDF_DOCUMENT doc = FPDF_LoadMemDocument(payload->buffer.data(),
+                                              static_cast<int>(payload->buffer.size()),
                                               password.empty() ? nullptr : password.c_str());
     if (!doc) {
         unsigned long err = FPDF_GetLastError();
         throw PdfError("Failed to parse PDF: " + pathToString(path) + " (" + pdfiumError(err) + ")");
     }
 
-    return PdfDocumentHandle(doc);
+    return {PdfDocumentHandle(doc), payload};
 }
 
 PdfDocumentHandle PdfDocument::create() {

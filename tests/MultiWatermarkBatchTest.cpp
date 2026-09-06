@@ -223,8 +223,8 @@ void testMultiWatermarkBatch() {
         assert(entries.size() == 2);
         for (const auto& pdf : entries) {
             assert(fs::file_size(pdf) > 0);
-            auto doc = PdfDocument::open(pdf);
-            assert(PdfDocument::pageCount(doc.get()) == 1);
+            auto docRef = PdfDocument::open(pdf);
+            assert(PdfDocument::pageCount(docRef.first.get()) == 1);
         }
     }
     fs::remove_all(workDir2, ec);

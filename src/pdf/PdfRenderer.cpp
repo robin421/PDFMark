@@ -13,51 +13,76 @@ namespace pdfmark {
 
 QImage PdfRenderer::rasterizePage(FPDF_PAGE page, int dpi) {
     if (!page) throw PdfError("Null page handle");
-    if (dpi < 72 || dpi > 600) {
-        throw PdfError("DPI out of range (72-600): " + std::to_string(dpi));
+
+    double widthPt = 0, heightPt = 0;
+    try {
+        widthPt = PdfDocument::getPageWidth(page);
+        heightPt = PdfDocument::getPageHeight(page);
+    } catch (...) {
+        throw PdfError("Failed to read page dimensions from PDF");
     }
 
-    // Page dimensions in PDF points (1/72 inch)
-    double widthPt = PdfDocument::getPageWidth(page);
-    double heightPt = PdfDocument::getPageHeight(page);
     if (widthPt <= 0.0 || heightPt <= 0.0) {
         throw PdfError("Invalid page dimensions");
+    }
+
+    if (dpi < 10 || dpi > 1200) {
+        throw PdfError("DPI out of range (10-1200): " + std::to_string(dpi));
     }
 
     int widthPx = (std::max)(1, static_cast<int>(std::round(widthPt * dpi / 72.0)));
     int heightPx = (std::max)(1, static_cast<int>(std::round(heightPt * dpi / 72.0)));
 
-    // Create 32-bit BGRx bitmap (alpha = 0: no alpha channel, 4 bytes per pixel)
-    FPDF_BITMAP bitmap = FPDFBitmap_Create(widthPx, heightPx, 0);
+    // Guard against absurdly large allocations (> 100 MPix)
+    if (widthPx > 10000 || heightPx > 10000) {
+        throw PdfError("Page too large to rasterize safely: " +
+                       std::to_string(widthPx) + "x" + std::to_string(heightPx) +
+                       " pixels (limit: 10000px per dimension)");
+    }
+
+    // Guard bitmap creation in a nested try-catch
+    FPDF_BITMAP bitmap = nullptr;
+    try {
+        bitmap = FPDFBitmap_Create(widthPx, heightPx, 0);
+    } catch (...) {
+        throw PdfError("FPDFBitmap_Create threw an exception");
+    }
+
     if (!bitmap) {
         throw PdfError("Failed to allocate FPDF_BITMAP of size " +
                        std::to_string(widthPx) + "x" + std::to_string(heightPx));
     }
 
-    // Fill background with white (0xFFFFFFFF)
-    FPDFBitmap_FillRect(bitmap, 0, 0, widthPx, heightPx, 0xFFFFFFFF);
+    try {
+        // Fill background with white
+        FPDFBitmap_FillRect(bitmap, 0, 0, widthPx, heightPx, 0xFFFFFFFF);
 
-    // Render page content onto bitmap with annotations enabled
-    FPDF_RenderPageBitmap(bitmap, page, 0, 0, widthPx, heightPx, 0, FPDF_ANNOT);
+        // Render page — this is where pdfium crashes on malformed XFA/forms
+        FPDF_RenderPageBitmap(bitmap, page, 0, 0, widthPx, heightPx, 0, FPDF_ANNOT);
 
-    // Read pixel buffer
-    void* buffer = FPDFBitmap_GetBuffer(bitmap);
-    int stride = FPDFBitmap_GetStride(bitmap);
+        // Read pixel buffer
+        void* buffer = FPDFBitmap_GetBuffer(bitmap);
+        int stride = FPDFBitmap_GetStride(bitmap);
 
-    if (!buffer || stride <= 0) {
+        if (!buffer || stride <= 0) {
+            throw PdfError("FPDFBitmap_GetBuffer returned null or invalid stride");
+        }
+
+        // QImage::Format_RGB32: little-endian = B,G,R,0
+        const uchar* ubuf = static_cast<const uchar*>(buffer);
+        QImage result = QImage(ubuf, widthPx, heightPx, stride, QImage::Format_RGB32).copy();
+
+        if (result.isNull()) {
+            throw PdfError("QImage copy() returned null image");
+        }
+
+        return result;
+    } catch (...) {
+        // Ensure bitmap is always freed, then re-throw
         FPDFBitmap_Destroy(bitmap);
-        throw PdfError("Failed to read rendered bitmap buffer");
+        throw;
     }
-
-    // QImage::Format_RGB32 interprets 0x00RRGGBB in native-endian (little endian = B, G, R, 0)
-    // Matches PDFium's BGRx layout on both Windows and macOS (little-endian ARM/x86).
-    const uchar* ubuf = static_cast<const uchar*>(buffer);
-    QImage result = QImage(ubuf, widthPx, heightPx, stride, QImage::Format_RGB32).copy();
-
-    // Free PDFium bitmap immediately to maintain O(1) memory
-    FPDFBitmap_Destroy(bitmap);
-
-    return result;
 }
+
 
 } // namespace pdfmark
