@@ -287,6 +287,9 @@ void MainWindow::setupConnections() {
     connect(&taskManager_, &TaskManager::allFinished, this, &MainWindow::onAllFinished);
     connect(&taskManager_, &TaskManager::cancelled, this, &MainWindow::onCancelled);
     connect(&taskManager_, &TaskManager::passwordRequired, this, &MainWindow::onPasswordRequired);
+    connect(&taskManager_, &TaskManager::errorOccurred, this, [this](const QString& msg) {
+        QMessageBox::critical(this, "错误", "任务处理发生异常：\n" + msg);
+    });
 }
 
 WatermarkConfig MainWindow::currentConfig() const {
@@ -377,9 +380,10 @@ void MainWindow::removeWatermarkRow(int index) {
     for (int i = 0; i < watermarkLayout_->count(); ++i) {
         auto* item = watermarkLayout_->itemAt(i);
         if (auto* row = qobject_cast<WatermarkRow*>(item->widget())) {
-            // Delete matching widget
-            delete row;
-            break;
+            if (row->index() == index) {
+                delete row;
+                break;
+            }
         }
     }
     saveCurrentWatermarks();
@@ -725,6 +729,11 @@ void MainWindow::onFileFinished(const FileResult& result) {
 
 void MainWindow::onAllFinished(const std::vector<FileResult>& results) {
     updateUiState(false);
+    if (results.empty()) {
+        statusLabel_->setText("未执行任何任务。");
+        QMessageBox::information(this, "提示", "未执行任何任务，请检查输入文件及水印设置。");
+        return;
+    }
 
     int successCount = 0;
     for (const auto& r : results) {
@@ -738,20 +747,18 @@ void MainWindow::onAllFinished(const std::vector<FileResult>& results) {
                              .arg(successCount)
                              .arg(results.size() - successCount));
 
-    if (!results.empty()) {
-        for (const auto& r : results) {
-            if (r.success) {
-                lastOutputDir_ = QString::fromStdString(r.outputPath.parent_path().string());
-                break;
-            }
+    for (const auto& r : results) {
+        if (r.success) {
+            lastOutputDir_ = QString::fromUtf8(pathToString(r.outputPath.parent_path()).c_str());
+            break;
         }
-        if (lastOutputDir_.isEmpty()) {
-            lastOutputDir_ = QString::fromStdString(results[0].outputPath.parent_path().string());
+    }
+    if (lastOutputDir_.isEmpty()) {
+        if (!outputDirEdit_->text().trimmed().isEmpty()) {
+            lastOutputDir_ = outputDirEdit_->text().trimmed();
+        } else if (!results.empty()) {
+            lastOutputDir_ = QString::fromUtf8(pathToString(results[0].outputPath.parent_path()).c_str());
         }
-    } else if (!outputDirEdit_->text().trimmed().isEmpty()) {
-        lastOutputDir_ = outputDirEdit_->text().trimmed();
-    } else {
-        lastOutputDir_.clear();
     }
     openFolderBtn_->setEnabled(!lastOutputDir_.isEmpty());
 }

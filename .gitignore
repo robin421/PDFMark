@@ -25,3 +25,4 @@ third_party/pdfium/*.zip
 .idea/
 *.user
 dist/
+build-macos/

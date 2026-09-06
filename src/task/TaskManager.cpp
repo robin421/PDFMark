@@ -134,16 +134,16 @@ void TaskManager::cancel() {
 }
 
 fs::path TaskManager::outputPathFor(const fs::path& input, const std::string& watermarkText) const {
-    std::string stem = sanitizeFilename(input.stem().string());
+    std::string stem = sanitizeFilename(pathToString(input.stem()));
     std::string cleanTag = watermarkText.empty() ? std::string("watermarked")
                                                  : sanitizeFilename(watermarkText);
     std::string filename = cleanTag + ".pdf";
     std::string subdir = stem.empty() ? "output" : stem;
 
     if (!outputDir_.empty()) {
-        return outputDir_ / subdir / filename;
+        return outputDir_ / stringToPath(subdir) / stringToPath(filename);
     }
-    return input.parent_path() / subdir / filename;
+    return input.parent_path() / stringToPath(subdir) / stringToPath(filename);
 }
 
 FileResult TaskManager::processSingleFile(const fs::path& input,
@@ -176,7 +176,7 @@ FileResult TaskManager::processSingleFile(const fs::path& input,
         result.totalPages = totalPages;
 
         if (totalPages <= 0) {
-            throw PdfError("PDF has no pages: " + input.string());
+            throw PdfError("PDF has no pages: " + pathToString(input));
         }
         PdfDocumentHandle dstDoc = PdfDocument::create();
 
@@ -266,19 +266,36 @@ void TaskManager::start() {
                 const auto& task = activeSubtasks[idx];
                 const auto& filePath = task.input;
                 const auto& cfg = task.config;
-                // Use UTF-8 → QString to avoid GBK/ACP corruption on Chinese Windows
-                QString fileName = QString::fromUtf8(filePath.filename().u8string().c_str());
-                QString displayName = QString::fromUtf8("%1 [%2]")
+
+                QString fileName = QString::fromUtf8(pathToString(filePath.filename()).c_str());
+                QString displayName = QString("%1 [%2]")
                     .arg(fileName)
-                    .arg(QString::fromUtf8(cfg.text));
+                    .arg(QString::fromUtf8(cfg.text.c_str()));
 
-                fs::path outPath = outputPathFor(filePath, cfg.text);
+                emit fileStarted(displayName, completed + 1, totalSubtasks);
 
-                auto pageCb = [this, displayName](int cur, int tot) {
-                    emit pageProgress(displayName, cur, tot);
-                };
+                FileResult res;
+                try {
+                    fs::path outPath = outputPathFor(filePath, cfg.text);
 
-                FileResult res = processSingleFile(filePath, outPath, cfg, pageCb);
+                    auto pageCb = [this, displayName](int cur, int tot) {
+                        emit pageProgress(displayName, cur, tot);
+                    };
+
+                    res = processSingleFile(filePath, outPath, cfg, pageCb);
+                } catch (const std::exception& e) {
+                    res.inputPath = filePath;
+                    res.watermarkText = cfg.text;
+                    res.success = false;
+                    res.errorMessage = e.what();
+                    qCritical() << "Error processing file" << fileName << ":" << e.what();
+                } catch (...) {
+                    res.inputPath = filePath;
+                    res.watermarkText = cfg.text;
+                    res.success = false;
+                    res.errorMessage = "Unknown error during processing";
+                    qCritical() << "Unknown error processing file" << fileName;
+                }
 
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
@@ -299,18 +316,25 @@ void TaskManager::start() {
             running_.store(false);
             emit allFinished(finalResults);
         } catch (const std::exception& e) {
-            // Catch any exception that propagates from processSingleFile or signal emission
-            // to prevent std::terminate() in QThreadPool worker.
-            std::vector<FileResult> emptyResults;
+            std::vector<FileResult> currentResults;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                currentResults = results_;
+            }
             running_.store(false);
-            // Log to file via Qt message handler (thread-safe)
-            qCritical() << "TaskManager worker thread crashed:" << e.what();
-            emit allFinished(emptyResults);
+            qCritical() << "TaskManager worker thread critical failure:" << e.what();
+            emit errorOccurred(QString::fromUtf8(e.what()));
+            emit allFinished(currentResults);
         } catch (...) {
-            qCritical() << "TaskManager worker thread crashed: unknown exception";
+            std::vector<FileResult> currentResults;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                currentResults = results_;
+            }
             running_.store(false);
-            std::vector<FileResult> emptyResults;
-            emit allFinished(emptyResults);
+            qCritical() << "TaskManager worker thread critical failure: unknown exception";
+            emit errorOccurred("Worker thread encountered an unknown critical failure");
+            emit allFinished(currentResults);
         }
     });
 }

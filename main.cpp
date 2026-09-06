@@ -98,6 +98,10 @@ int main(int argc, char *argv[]) {
         QApplication::setApplicationDisplayName("PDFMark");
         QApplication::setOrganizationName("PDFMark");
 
+        // Register meta types for cross-thread signal/slot
+        qRegisterMetaType<pdfmark::FileResult>("pdfmark::FileResult");
+        qRegisterMetaType<std::vector<pdfmark::FileResult>>("std::vector<pdfmark::FileResult>");
+
         pdfmark::MainWindow window;
         window.show();
 

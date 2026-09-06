@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 #include <QString>
+#include <QMetaType>
 namespace pdfmark {
 
 namespace fs = std::filesystem;
@@ -25,6 +26,13 @@ inline fs::path qstringToPath(const QString& str) {
     return fs::path(str.toStdWString());
 #else
     return fs::path(str.toUtf8().toStdString());
+#endif
+}
+inline fs::path stringToPath(const std::string& u8str) {
+#ifdef _WIN32
+    return fs::u8path(u8str);
+#else
+    return fs::path(u8str);
 #endif
 }
 
@@ -89,3 +97,6 @@ struct FileResult {
     std::string errorMessage;
 };
 } // namespace pdfmark
+
+Q_DECLARE_METATYPE(pdfmark::FileResult)
+Q_DECLARE_METATYPE(std::vector<pdfmark::FileResult>)

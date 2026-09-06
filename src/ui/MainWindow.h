@@ -28,6 +28,7 @@ public:
 
     QString text() const;
     void setText(const QString& t);
+    int index() const { return index_; }
 
 signals:
     void textChanged();
