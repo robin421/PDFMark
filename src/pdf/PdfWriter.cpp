@@ -73,7 +73,7 @@ void PdfWriter::appendRasterPage(FPDF_DOCUMENT doc,
     // Inline: copies JPEG content into PDF stream; fileAccess may be destroyed after call.
     FPDF_BOOL ok = FPDFImageObj_LoadJpegFileInline(nullptr, 0, imgObj, &fileAccess);
     if (!ok) {
-        // Object is not yet owned by the page, free it implicitly via page close path
+        FPDFPageObj_Destroy(imgObj);
         FPDF_ClosePage(page);
         throw PdfError("Failed to load JPEG into image object for page " + std::to_string(pageIndex));
     }

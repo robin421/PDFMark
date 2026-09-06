@@ -116,7 +116,16 @@ void PdfDocument::save(FPDF_DOCUMENT doc, const fs::path& path) {
     fw.version = 1;
     fw.WriteBlock = FsFileWrite_Block;
     fw.path = pathToString(path);
+
+#ifdef _WIN32
+    // On Windows, std::fopen decodes the UTF-8 bytes using the system ANSI
+    // code page (CP936/GBK on Chinese Windows), which turns non-ASCII paths
+    // into invalid filenames and returns NULL.  Open the wide path directly
+    // so Chinese / emoji output directories work.
+    fw.file = _wfopen(path.wstring().c_str(), L"wb");
+#else
     fw.file = std::fopen(fw.path.c_str(), "wb");
+#endif
     if (!fw.file) {
         throw PdfError("Failed to open output file: " + fw.path);
     }

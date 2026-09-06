@@ -683,8 +683,11 @@ void MainWindow::onFileStarted(const QString& fileName, int index, int total) {
     }
     // Update row status
     for (int r = 0; r < fileTable_->rowCount(); ++r) {
-        if (fileTable_->item(r, 0)->text() == baseName) {
-            fileTable_->item(r, 2)->setText("处理中...");
+        auto* nameItem = fileTable_->item(r, 0);
+        if (!nameItem) continue;
+        if (nameItem->text() == baseName) {
+            auto* statusItem = fileTable_->item(r, 2);
+            if (statusItem) statusItem->setText("处理中...");
             break;
         }
     }
@@ -699,19 +702,24 @@ void MainWindow::onFileProgress(int completed, int total) {
     int pct = total > 0 ? (completed * 100 / total) : 0;
     totalProgressBar_->setValue(pct);
 }
-
 void MainWindow::onFileFinished(const FileResult& result) {
-    QString fileName = QString::fromStdString(result.inputPath.filename().string());
+    // Use UTF-8 safe conversion to match the path encoding used everywhere else
+    QString fileName = QString::fromUtf8(pathToString(result.inputPath.filename()).c_str());
     for (int r = 0; r < fileTable_->rowCount(); ++r) {
-        if (fileTable_->item(r, 0)->text() == fileName) {
-            fileTable_->item(r, 1)->setText(QString::number(result.totalPages));
+        auto* nameItem = fileTable_->item(r, 0);
+        if (!nameItem) continue;
+        if (nameItem->text() != fileName) continue;
+        auto* pageItem = fileTable_->item(r, 1);
+        auto* statusItem = fileTable_->item(r, 2);
+        if (pageItem) pageItem->setText(QString::number(result.totalPages));
+        if (statusItem) {
             if (result.success) {
-                fileTable_->item(r, 2)->setText(QString("完成 (%1 ms)").arg(static_cast<int>(result.elapsedMs)));
+                statusItem->setText(QString("完成 (%1 ms)").arg(static_cast<int>(result.elapsedMs)));
             } else {
-                fileTable_->item(r, 2)->setText(QString("失败: %1").arg(QString::fromStdString(result.errorMessage)));
+                statusItem->setText(QString("失败: %1").arg(QString::fromStdString(result.errorMessage)));
             }
-            break;
         }
+        break;
     }
 }
 
