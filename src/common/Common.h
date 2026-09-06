@@ -13,6 +13,11 @@
 #include <vector>
 #include <QString>
 #include <QMetaType>
+#define PDFMARK_VERSION "1.1.0"
+#define PDFMARK_VERSION_MAJOR 1
+#define PDFMARK_VERSION_MINOR 1
+#define PDFMARK_VERSION_PATCH 0
+
 namespace pdfmark {
 
 namespace fs = std::filesystem;

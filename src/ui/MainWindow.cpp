@@ -3,6 +3,14 @@
 #include "ui/PasswordDialog.h"
 #include "diagnostics/Diagnostics.h"
 #include "pdf/PdfDocument.h"
+#include "updater/AutoUpdater.h"
+#include "updater/UpdateDialog.h"
+
+#include <QMenuBar>
+#include <QMenu>
+#include <QAction>
+#include <QTimer>
+#include <QStatusBar>
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -58,7 +66,6 @@ QString WatermarkRow::text() const {
 void WatermarkRow::setText(const QString& t) {
     lineEdit_->setText(t);
 }
-
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent) {
     setupUi();
@@ -66,9 +73,24 @@ MainWindow::MainWindow(QWidget* parent)
     setWindowTitle("PDF 水印固化工具");
     resize(1100, 720);
     updateUiState(false);
+
+    // Auto-update: create updater, add Help menu, and do a silent background check
+    autoUpdater_ = new AutoUpdater(this);
+
+    QMenu* helpMenu = menuBar()->addMenu("帮助(&H)");
+    QAction* checkUpdateAct = helpMenu->addAction("检查更新(&U)...");
+    connect(checkUpdateAct, &QAction::triggered, this, &MainWindow::onCheckForUpdates);
+
+    // Background silent check 2 seconds after startup
+    QTimer::singleShot(2000, this, [this]() {
+        connect(autoUpdater_, &AutoUpdater::updateAvailable,
+                this, &MainWindow::onSilentUpdateAvailable);
+        autoUpdater_->checkForUpdates(true);
+    });
 }
 
 MainWindow::~MainWindow() = default;
+
 void MainWindow::setupUi() {
     auto* centralWidget = new QWidget(this);
     setCentralWidget(centralWidget);
@@ -781,6 +803,21 @@ void MainWindow::onPasswordRequired(const QString& filePath) {
 void MainWindow::onOpenOutputFolder() {
     if (lastOutputDir_.isEmpty()) return;
     QDesktopServices::openUrl(QUrl::fromLocalFile(lastOutputDir_));
+}
+
+void MainWindow::onCheckForUpdates() {
+    auto* dlg = new UpdateDialog(autoUpdater_, this);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->show();
+}
+
+void MainWindow::onSilentUpdateAvailable(const UpdateInfo& info) {
+    // Disconnect so this fires only once per session
+    disconnect(autoUpdater_, &AutoUpdater::updateAvailable,
+               this, &MainWindow::onSilentUpdateAvailable);
+    // Show a non-blocking notification in the status bar
+    statusBar()->showMessage(
+        QString("发现新版本 %1，访问「帮助→检查更新」进行升级").arg(info.versionTag), 10000);
 }
 
 } // namespace pdfmark

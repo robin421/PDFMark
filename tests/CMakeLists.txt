@@ -48,4 +48,14 @@ endif()
 # Common types test
 add_test(NAME CommonTest COMMAND pdfmark_tests --test Common)
 # Multi-watermark batch test
+
+# AutoUpdater test
+add_executable(pdfmark_updater_test
+    AutoUpdaterTest.cpp
+)
+target_link_libraries(pdfmark_updater_test PRIVATE
+    pdfmark_core
+    Qt6::Test
+)
+add_test(NAME AutoUpdaterTest COMMAND pdfmark_updater_test)
 add_test(NAME MultiWatermarkBatchTest COMMAND pdfmark_tests --test MultiWatermarkBatch)

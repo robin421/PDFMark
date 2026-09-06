@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(PDFMark VERSION 1.0.9 LANGUAGES CXX C)
+project(PDFMark VERSION 1.1.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -20,7 +20,7 @@ set(APP_ICON_RC   "${CMAKE_CURRENT_SOURCE_DIR}/resources/pdfmark.rc")
 set(APP_RESOURCES_QRC "${CMAKE_CURRENT_SOURCE_DIR}/resources/resources.qrc")
 
 # Find Qt6 components
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Test)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Test Network)
 # Find or setup PDFium
 set(PDFIUM_VERSION "8035")
 set(LOCAL_PDFIUM "${CMAKE_CURRENT_SOURCE_DIR}/third_party/pdfium")
@@ -86,6 +86,12 @@ add_library(pdfmark_core STATIC
     src/task/WorkerPool.cpp
     src/diagnostics/Diagnostics.h
     src/diagnostics/Diagnostics.cpp
+    src/diagnostics/CrashReporter.h
+    src/diagnostics/CrashReporter.cpp
+    src/updater/AutoUpdater.h
+    src/updater/AutoUpdater.cpp
+    src/updater/UpdateDialog.h
+    src/updater/UpdateDialog.cpp
 )
 
 if(MSVC)
@@ -101,8 +107,13 @@ target_link_libraries(pdfmark_core PUBLIC
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets
+    Qt6::Network
     pdfium
 )
+if(WIN32)
+    target_link_libraries(pdfmark_core PUBLIC winhttp)
+endif()
+
 
 set(APP_SRCS
     main.cpp

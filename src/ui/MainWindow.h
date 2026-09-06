@@ -40,6 +40,9 @@ private:
     int index_ = -1;
 };
 
+class AutoUpdater;
+struct UpdateInfo;
+
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
@@ -73,6 +76,10 @@ protected:
     void addWatermarkRow();
     void removeWatermarkRow(int index);
     void onWatermarkTextChanged();
+
+    // Auto-update
+    void onCheckForUpdates();
+    void onSilentUpdateAvailable(const UpdateInfo& info);
 
 private:
     void setupUi();
@@ -118,6 +125,7 @@ private:
     QString currentSelectedFile_;  // currently displayed PDF path
 
     int nextWatermarkIndex_ = 0;  // monotonic index for WatermarkRow identity
+    AutoUpdater* autoUpdater_ = nullptr;
 };
 
 } // namespace pdfmark

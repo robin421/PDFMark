@@ -7,6 +7,8 @@
 #include <windows.h>
 #include <dbghelp.h>
 #endif
+#include "diagnostics/CrashReporter.h"
+
 
 #include <QDebug>
 #include <QFile>
@@ -58,10 +60,54 @@ long WINAPI unhandledExceptionFilter(EXCEPTION_POINTERS* pExc) {
         MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), hFile,
             MiniDumpNormal, &mei, nullptr, nullptr);
         CloseHandle(hFile);
-        MessageBoxA(nullptr,
-            ("PDFMark encountered a crash. Minidump written to:\n" + dumpPath).toUtf8().constData(),
-            "PDFMark Crash", MB_ICONERROR | MB_OK);
     }
+
+    DWORD code = pExc && pExc->ExceptionRecord ? pExc->ExceptionRecord->ExceptionCode : 0;
+    void* addr = pExc && pExc->ExceptionRecord ? pExc->ExceptionRecord->ExceptionAddress : nullptr;
+    QString exType = QString("SEH_0x%1").arg(code, 8, 16, QChar('0')).toUpper();
+    QString exValue = QString("Exception at address 0x%1").arg(reinterpret_cast<quintptr>(addr), 0, 16);
+    QString modName = "unknown";
+
+    HMODULE hMod = nullptr;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCSTR>(addr), &hMod) && hMod) {
+        char modPath[MAX_PATH] = {0};
+        if (GetModuleFileNameA(hMod, modPath, MAX_PATH)) {
+            modName = QFileInfo(QString::fromLocal8Bit(modPath)).fileName();
+        }
+    }
+
+    QString logs = pdfmark::CrashReporter::getRecentLogLines(50);
+    QString extra = QString("Dump: %1\nCode: 0x%2\nAddr: 0x%3")
+        .arg(dumpPath)
+        .arg(code, 8, 16, QChar('0'))
+        .arg(reinterpret_cast<quintptr>(addr), 0, 16);
+
+    bool reported = pdfmark::CrashReporter::sendReportSync(exType, exValue, modName, extra, logs);
+    if (!reported) {
+        QString appData = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+        QDir().mkpath(appData);
+        QFile pendingFile(appData + "/crash_pending.json");
+        if (pendingFile.open(QIODevice::WriteOnly)) {
+            QJsonObject obj;
+            obj["type"] = exType;
+            obj["value"] = exValue;
+            obj["module"] = modName;
+            obj["extra"] = extra;
+            obj["logs"] = logs;
+            pendingFile.write(QJsonDocument(obj).toJson());
+            pendingFile.close();
+        }
+    }
+
+    QString alertMsg = QString("PDFMark 发生未处理异常并终止运行。\n\n"
+                               "错误类型: %1\n"
+                               "崩溃模块: %2\n"
+                               "转储文件: %3\n"
+                               "上报状态: %4")
+        .arg(exType, modName, dumpPath, reported ? "已自动提交至崩溃追踪系统" : "将在下次启动时自动补报");
+
+    MessageBoxA(nullptr, alertMsg.toLocal8Bit().constData(), "PDFMark Crash", MB_ICONERROR | MB_OK);
     return EXCEPTION_EXECUTE_HANDLER;
 }
 #else
@@ -103,6 +149,9 @@ int main(int argc, char *argv[]) {
         qRegisterMetaType<std::vector<pdfmark::FileResult>>("std::vector<pdfmark::FileResult>");
 
         pdfmark::MainWindow window;
+        // Asynchronously check and report any pending crash from previous crash
+        pdfmark::CrashReporter::checkAndReportPendingCrashes();
+
         window.show();
 
         int ret = app.exec();
@@ -112,6 +161,7 @@ int main(int argc, char *argv[]) {
 #endif
         return ret;
     } catch (const std::exception& e) {
+        pdfmark::CrashReporter::sendReportSync("std::exception", e.what(), "main", "Fatal exception in main()", "");
 #ifdef _WIN32
         QString msg = QString("PDFMark 启动时捕获到异常：\n%1").arg(e.what());
         MessageBoxA(nullptr, msg.toUtf8().constData(), "PDFMark Error", MB_ICONERROR | MB_OK);
@@ -121,6 +171,7 @@ int main(int argc, char *argv[]) {
 #endif
         return 1;
     } catch (...) {
+        pdfmark::CrashReporter::sendReportSync("UnknownException", "Unknown exception caught in main()", "main", "Fatal exception in main()", "");
 #ifdef _WIN32
         MessageBoxA(nullptr, "PDFMark 启动时捕获到未知异常", "PDFMark Error", MB_ICONERROR | MB_OK);
         delete g_logFile;
