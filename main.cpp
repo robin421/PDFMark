@@ -126,11 +126,3 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 }
-
-#ifdef _WIN32
-// WinMain entry point for Windows GUI application (no console)
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
-    Q_UNUSED(hInstance); Q_UNUSED(hPrevInstance); Q_UNUSED(lpCmdLine); Q_UNUSED(nCmdShow);
-    return main(qApp ? qApp->argc() : 0, qApp ? qApp->argv() : nullptr);
-}
-#endif
