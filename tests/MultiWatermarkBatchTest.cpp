@@ -53,19 +53,19 @@ fs::path createTestPdf(const fs::path& outPath) {
 } // namespace
 
 void testMultiWatermarkBatch() {
-    std::cout << "[RUN] testMultiWatermarkBatch\n";
+    std::cout << "[RUN] testMultiWatermarkBatch" << std::endl;
 
     fs::path workDir = "multi_wm_e2e";
     std::error_code ec;
     fs::remove_all(workDir, ec);
     fs::create_directories(workDir);
+    std::cout << "[STEP 1] Directory created" << std::endl;
 
     fs::path inputPdf = workDir / "sample_input.pdf";
     createTestPdf(inputPdf);
+    std::cout << "[STEP 2] Test PDF created: " << pathToString(inputPdf) << std::endl;
     assert(fs::exists(inputPdf));
     assert(fs::file_size(inputPdf) > 0);
-
-    // Watermark list: includes regular text and a string with
     // illegal filename characters to exercise sanitization.
     std::vector<std::string> rawWatermarks = {
         "机密-张三",
@@ -111,21 +111,25 @@ void testMultiWatermarkBatch() {
                      [&fileStartedCount](const QString&, int, int) {
                          ++fileStartedCount;
                      });
-
+    std::cout << "[STEP 3] Starting TaskManager..." << std::endl;
     mgr.start();
+    std::cout << "[STEP 4] Waiting for completion..." << std::endl;
 
     // Wait for completion (poll up to 60s).
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
     while ((mgr.isRunning() || allFinishedCount == 0) && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
+    std::cout << "[STEP 5] Finished waiting. isRunning=" << mgr.isRunning() 
+              << ", allFinishedCount=" << allFinishedCount 
+              << ", fileStartedCount=" << fileStartedCount << std::endl;
     assert(!mgr.isRunning());
     assert(allFinishedCount == 1);
     assert(fileStartedCount == static_cast<int>(configs.size()));
 
     const auto& results = mgr.results();
+    std::cout << "[STEP 6] Results count=" << results.size() << std::endl;
     assert(results.size() == configs.size());
-
     for (const auto& r : results) {
         assert(r.success);
         assert(r.totalPages == 1);

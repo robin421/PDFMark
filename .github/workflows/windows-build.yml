@@ -46,9 +46,18 @@ jobs:
           cmake --build build --config Release
 
       - name: Run Unit and Visual Tests
+        shell: pwsh
         run: |
           ctest --test-dir build --output-on-failure -C Release
-
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "--- Running MultiWatermarkBatchTest directly for verbose output ---"
+            if (Test-Path "build\pdfmark_tests.exe") {
+              & "build\pdfmark_tests.exe" --test MultiWatermarkBatch
+            } elseif (Test-Path "build\Release\pdfmark_tests.exe") {
+              & "build\Release\pdfmark_tests.exe" --test MultiWatermarkBatch
+            }
+            exit 1
+          }
       - name: Package Windows Portable Release
         shell: pwsh
         run: |
