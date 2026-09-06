@@ -64,7 +64,7 @@ private:
                                  const WatermarkConfig& config,
                                  std::function<void(int,int)> pageCallback);
 
-    fs::path outputPathFor(const fs::path& input, const std::string& watermarkText = "") const;
+    fs::path outputPathFor(const fs::path& input, const std::string& watermarkText = "", int duplicateIndex = 0) const;
 
     mutable std::mutex mutex_;
     WatermarkConfig config_;

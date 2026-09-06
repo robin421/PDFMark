@@ -6,12 +6,35 @@
 #include "pdf/PdfWriter.h"
 #include "watermark/WatermarkRenderer.h"
 #include "diagnostics/Diagnostics.h"
+#include "diagnostics/CrashReporter.h"
 #include <QFileInfo>
-#include <QtConcurrent/QtConcurrent>
 #include <QDir>
+#include <QTimer>
 #include <iostream>
+#include <atomic>
+#include <chrono>
+#include <unordered_set>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace pdfmark {
+
+static uint64_t getUniqueTempId() {
+#ifdef _WIN32
+    uint64_t pid = static_cast<uint64_t>(GetCurrentProcessId());
+#else
+    uint64_t pid = static_cast<uint64_t>(getpid());
+#endif
+    static std::atomic<uint64_t> counter{0};
+    uint64_t cnt = counter.fetch_add(1, std::memory_order_relaxed);
+    auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    return (pid << 48) ^ (static_cast<uint64_t>(now) << 16) ^ cnt;
+}
 
 TaskManager::TaskManager(QObject* parent)
     : QObject(parent),
@@ -133,11 +156,17 @@ void TaskManager::cancel() {
     }
 }
 
-fs::path TaskManager::outputPathFor(const fs::path& input, const std::string& watermarkText) const {
+fs::path TaskManager::outputPathFor(const fs::path& input,
+                                   const std::string& watermarkText,
+                                   int duplicateIndex) const {
     std::string stem = sanitizeFilename(pathToString(input.stem()));
     std::string cleanTag = watermarkText.empty() ? std::string("watermarked")
                                                  : sanitizeFilename(watermarkText);
-    std::string filename = cleanTag + ".pdf";
+    std::string filename = cleanTag;
+    if (duplicateIndex > 0) {
+        filename += "_" + std::to_string(duplicateIndex);
+    }
+    filename += ".pdf";
     std::string subdir = stem.empty() ? "output" : stem;
 
     if (!outputDir_.empty()) {
@@ -157,19 +186,25 @@ FileResult TaskManager::processSingleFile(const fs::path& input,
     double elapsed = 0.0;
     ScopedTimer timer(elapsed);
 
-    fs::path tempOutput = output;
-    tempOutput += ".tmp.pdf";
+    // Unique temp file to avoid collisions with concurrent tasks or file locks
+    uint64_t uid = getUniqueTempId();
+    fs::path tempOutput = output.parent_path() / stringToPath(
+        "~" + pathToString(output.filename()) + "." + std::to_string(uid) + ".tmp");
 
     std::string password;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        // Use pathToString (UTF-8) to match keys stored from QString::toStdString (UTF-8)
         auto it = passwords_.find(pathToString(input));
         if (it != passwords_.end()) password = it->second;
     }
+
     try {
-        // Ensure target subdirectory exists
-        fs::create_directories(output.parent_path());
+        // Ensure target subdirectory exists safely
+        std::error_code ecMkdir;
+        fs::create_directories(output.parent_path(), ecMkdir);
+        if (ecMkdir && !fs::exists(output.parent_path())) {
+            throw PdfError("Cannot create output directory: " + ecMkdir.message());
+        }
 
         PdfDocumentRef srcDocRef = PdfDocument::open(input, password);
         FPDF_DOCUMENT srcDoc = srcDocRef.first.get();
@@ -186,45 +221,61 @@ FileResult TaskManager::processSingleFile(const fs::path& input,
                 throw PdfError("Operation cancelled by user");
             }
 
-            // Stream single page
             PdfPageHandle srcPage = PdfDocument::loadPage(srcDoc, i);
             double widthPt = PdfDocument::getPageWidth(srcPage.get());
             double heightPt = PdfDocument::getPageHeight(srcPage.get());
 
-            // 1. Rasterize
             QImage image = PdfRenderer::rasterizePage(srcPage.get(), config.dpi);
-
-            // 2. Watermark fuse
             WatermarkRenderer::applyWatermark(image, config);
-
-            // 3. Bake into new page
             PdfWriter::appendRasterPage(dstDoc.get(), image, widthPt, heightPt, config.jpegQuality);
 
-            // Notify progress
             if (pageCallback) {
                 pageCallback(i + 1, totalPages);
             }
         }
 
-        // Write output
+        // Write to temp file first
         PdfDocument::save(dstDoc.get(), tempOutput);
 
-        // Atomic rename
-        std::error_code ec;
-        fs::rename(tempOutput, output, ec);
-        if (ec) {
-            // Fallback for cross-filesystem moves
-            fs::copy_file(tempOutput, output, fs::copy_options::overwrite_existing, ec);
-            fs::remove(tempOutput, ec);
+        // Atomic rename to final destination
+        std::error_code ecRename;
+        fs::rename(tempOutput, output, ecRename);
+        if (ecRename) {
+            std::error_code ecCopy;
+            fs::copy_file(tempOutput, output, fs::copy_options::overwrite_existing, ecCopy);
+            if (ecCopy) {
+                std::error_code ecRm;
+                fs::remove(tempOutput, ecRm);
+                throw PdfError("Failed to save output file: rename (" + ecRename.message() +
+                               "), copy (" + ecCopy.message() + ")");
+            }
+            std::error_code ecRm;
+            fs::remove(tempOutput, ecRm);
         }
 
         result.success = true;
     } catch (const std::exception& e) {
         result.success = false;
         result.errorMessage = e.what();
-        // Clean up partial file on error
         std::error_code ec;
         fs::remove(tempOutput, ec);
+
+        // Report task error asynchronously to GlitchTip for remote monitoring
+        QString extra = QString("Input: %1\nOutput: %2\nWatermark: %3")
+            .arg(QString::fromUtf8(pathToString(input).c_str()))
+            .arg(QString::fromUtf8(pathToString(output).c_str()))
+            .arg(QString::fromUtf8(config.text.c_str()));
+        CrashReporter::sendReportAsync("TaskError", e.what(), "TaskManager::processSingleFile", extra, "");
+        qCritical() << "Task error on" << QString::fromUtf8(pathToString(input.filename()).c_str())
+                    << ":" << e.what();
+    } catch (...) {
+        result.success = false;
+        result.errorMessage = "Unknown critical error occurred during processing";
+        std::error_code ec;
+        fs::remove(tempOutput, ec);
+
+        CrashReporter::sendReportAsync("TaskUnknownError", "Unknown exception", "TaskManager::processSingleFile", "", "");
+        qCritical() << "Unknown task error on" << QString::fromUtf8(pathToString(input.filename()).c_str());
     }
 
     result.elapsedMs = elapsed;
@@ -238,106 +289,120 @@ void TaskManager::start() {
 
     cancelRequested_.store(false);
 
-    // Launch worker thread
-    pool_->start([this]() {
-        try {
-            std::vector<FileSubtask> activeSubtasks;
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (!subtasks_.empty()) {
-                    activeSubtasks = subtasks_;
-                } else {
-                    std::vector<WatermarkConfig> activeConfigs = configs_.empty() ? std::vector<WatermarkConfig>{config_} : configs_;
-                    for (const auto& f : queue_) {
-                        for (const auto& c : activeConfigs) {
-                            activeSubtasks.push_back({f, c});
-                        }
-                    }
+    // Collect subtasks under lock
+    std::vector<FileSubtask> activeSubtasks;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!subtasks_.empty()) {
+            activeSubtasks = subtasks_;
+        } else {
+            std::vector<WatermarkConfig> activeConfigs = configs_.empty()
+                ? std::vector<WatermarkConfig>{config_} : configs_;
+            for (const auto& f : queue_) {
+                for (const auto& c : activeConfigs) {
+                    activeSubtasks.push_back({f, c});
                 }
-                results_.clear();
             }
-            int totalSubtasks = static_cast<int>(activeSubtasks.size());
-            int completed = 0;
+        }
+        results_.clear();
+    }
 
-            for (size_t idx = 0; idx < activeSubtasks.size(); ++idx) {
-                if (cancelRequested_.load()) {
-                    break;
-                }
+    int totalSubtasks = static_cast<int>(activeSubtasks.size());
+    if (totalSubtasks == 0) {
+        running_.store(false);
+        emit allFinished({});
+        return;
+    }
 
-                const auto& task = activeSubtasks[idx];
-                const auto& filePath = task.input;
-                const auto& cfg = task.config;
+    // Pre-assign collision-free output paths
+    struct SubtaskJob {
+        fs::path input;
+        fs::path output;
+        WatermarkConfig config;
+        int index = 0;
+    };
 
-                QString fileName = QString::fromUtf8(pathToString(filePath.filename()).c_str());
-                QString displayName = QString("%1 [%2]")
-                    .arg(fileName)
-                    .arg(QString::fromUtf8(cfg.text.c_str()));
+    std::vector<SubtaskJob> jobs;
+    jobs.reserve(activeSubtasks.size());
 
-                emit fileStarted(displayName, completed + 1, totalSubtasks);
+    std::unordered_set<std::string> usedOutputPaths;
+    for (size_t i = 0; i < activeSubtasks.size(); ++i) {
+        const auto& st = activeSubtasks[i];
+        int dupIdx = 0;
+        fs::path out = outputPathFor(st.input, st.config.text, dupIdx);
+        while (usedOutputPaths.find(pathToString(out)) != usedOutputPaths.end()) {
+            dupIdx++;
+            out = outputPathFor(st.input, st.config.text, dupIdx);
+        }
+        usedOutputPaths.insert(pathToString(out));
+        jobs.push_back({st.input, out, st.config, static_cast<int>(i + 1)});
+    }
 
+    auto completedCount = std::make_shared<std::atomic<int>>(0);
+    auto sharedResults = std::make_shared<std::vector<FileResult>>();
+    auto resultsLock = std::make_shared<std::mutex>();
+
+    for (const auto& job : jobs) {
+        pool_->start([this, job, totalSubtasks, completedCount, sharedResults, resultsLock]() {
+            if (cancelRequested_.load()) {
                 FileResult res;
-                try {
-                    fs::path outPath = outputPathFor(filePath, cfg.text);
-
-                    auto pageCb = [this, displayName](int cur, int tot) {
-                        emit pageProgress(displayName, cur, tot);
-                    };
-
-                    res = processSingleFile(filePath, outPath, cfg, pageCb);
-                } catch (const std::exception& e) {
-                    res.inputPath = filePath;
-                    res.watermarkText = cfg.text;
-                    res.success = false;
-                    res.errorMessage = e.what();
-                    qCritical() << "Error processing file" << fileName << ":" << e.what();
-                } catch (...) {
-                    res.inputPath = filePath;
-                    res.watermarkText = cfg.text;
-                    res.success = false;
-                    res.errorMessage = "Unknown error during processing";
-                    qCritical() << "Unknown error processing file" << fileName;
-                }
+                res.inputPath = job.input;
+                res.outputPath = job.output;
+                res.watermarkText = job.config.text;
+                res.success = false;
+                res.errorMessage = "Operation cancelled";
 
                 {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    results_.push_back(res);
+                    std::lock_guard<std::mutex> lk(*resultsLock);
+                    sharedResults->push_back(res);
                 }
-
-                completed++;
+                int done = completedCount->fetch_add(1, std::memory_order_relaxed) + 1;
                 emit fileFinished(res);
-                emit fileProgress(completed, totalSubtasks);
+                emit fileProgress(done, totalSubtasks);
+
+                if (done == totalSubtasks) {
+                    std::vector<FileResult> fin;
+                    {
+                        std::lock_guard<std::mutex> lk(*resultsLock);
+                        fin = *sharedResults;
+                        results_ = fin;
+                    }
+                    running_.store(false);
+                    emit allFinished(fin);
+                }
+                return;
             }
 
-            std::vector<FileResult> finalResults;
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                finalResults = results_;
-            }
+            QString fileName = QString::fromUtf8(pathToString(job.input.filename()).c_str());
+            QString displayName = QString("%1 [%2]").arg(fileName).arg(QString::fromUtf8(job.config.text.c_str()));
+            emit fileStarted(displayName, job.index, totalSubtasks);
 
-            running_.store(false);
-            emit allFinished(finalResults);
-        } catch (const std::exception& e) {
-            std::vector<FileResult> currentResults;
+            auto pageCb = [this, displayName](int cur, int tot) {
+                emit pageProgress(displayName, cur, tot);
+            };
+
+            FileResult res = processSingleFile(job.input, job.output, job.config, pageCb);
+
             {
-                std::lock_guard<std::mutex> lock(mutex_);
-                currentResults = results_;
+                std::lock_guard<std::mutex> lk(*resultsLock);
+                sharedResults->push_back(res);
             }
-            running_.store(false);
-            qCritical() << "TaskManager worker thread critical failure:" << e.what();
-            emit errorOccurred(QString::fromUtf8(e.what()));
-            emit allFinished(currentResults);
-        } catch (...) {
-            std::vector<FileResult> currentResults;
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                currentResults = results_;
+            int done = completedCount->fetch_add(1, std::memory_order_relaxed) + 1;
+            emit fileFinished(res);
+            emit fileProgress(done, totalSubtasks);
+
+            if (done == totalSubtasks) {
+                std::vector<FileResult> fin;
+                {
+                    std::lock_guard<std::mutex> lk(*resultsLock);
+                    fin = *sharedResults;
+                    results_ = fin;
+                }
+                running_.store(false);
+                emit allFinished(fin);
             }
-            running_.store(false);
-            qCritical() << "TaskManager worker thread critical failure: unknown exception";
-            emit errorOccurred("Worker thread encountered an unknown critical failure");
-            emit allFinished(currentResults);
-        }
-    });
+        });
+    }
 }
 
 } // namespace pdfmark

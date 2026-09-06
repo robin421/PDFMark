@@ -30,7 +30,8 @@
 #include <QPushButton>
 #include <QLineEdit>
 #include <QScrollArea>
-
+#include <QDesktopServices>
+#include <QStandardPaths>
 namespace pdfmark {
 
 // ── WatermarkRow ────────────────────────────────────────────────────────────
@@ -81,6 +82,11 @@ MainWindow::MainWindow(QWidget* parent)
     QAction* checkUpdateAct = helpMenu->addAction("检查更新(&U)...");
     connect(checkUpdateAct, &QAction::triggered, this, &MainWindow::onCheckForUpdates);
 
+    QAction* openLogAct = helpMenu->addAction("打开日志目录(&L)...");
+    connect(openLogAct, &QAction::triggered, this, []() {
+        QString logDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+        QDesktopServices::openUrl(QUrl::fromLocalFile(logDir));
+    });
     // Background silent check 2 seconds after startup
     QTimer::singleShot(2000, this, [this]() {
         connect(autoUpdater_, &AutoUpdater::updateAvailable,
@@ -737,12 +743,14 @@ void MainWindow::onFileFinished(const FileResult& result) {
         if (nameItem->text() != fileName) continue;
         auto* pageItem = fileTable_->item(r, 1);
         auto* statusItem = fileTable_->item(r, 2);
-        if (pageItem) pageItem->setText(QString::number(result.totalPages));
+        if (pageItem && result.totalPages > 0) pageItem->setText(QString::number(result.totalPages));
         if (statusItem) {
             if (result.success) {
-                statusItem->setText(QString("完成 (%1 ms)").arg(static_cast<int>(result.elapsedMs)));
+                statusItem->setText(QString("完成 [%1]").arg(QString::fromUtf8(result.watermarkText.c_str())));
             } else {
-                statusItem->setText(QString("失败: %1").arg(QString::fromStdString(result.errorMessage)));
+                statusItem->setText(QString("失败 [%1]: %2").arg(
+                    QString::fromUtf8(result.watermarkText.c_str()),
+                    QString::fromUtf8(result.errorMessage.c_str())));
             }
         }
         break;
@@ -758,17 +766,33 @@ void MainWindow::onAllFinished(const std::vector<FileResult>& results) {
     }
 
     int successCount = 0;
+    QString failDetails;
     for (const auto& r : results) {
-        if (r.success) successCount++;
+        if (r.success) {
+            successCount++;
+        } else {
+            QString fname = QString::fromUtf8(pathToString(r.inputPath.filename()).c_str());
+            QString wm = QString::fromUtf8(r.watermarkText.c_str());
+            QString err = QString::fromUtf8(r.errorMessage.c_str());
+            failDetails += QString("\n• %1 [水印: %2]: %3").arg(fname, wm, err);
+        }
     }
 
+    int failCount = static_cast<int>(results.size()) - successCount;
     statusLabel_->setText(QString("全部任务完成！成功: %1 / 总计: %2")
                           .arg(successCount).arg(results.size()));
-    QMessageBox::information(this, "完成",
-                             QString("批量固化完成！\n成功: %1\n失败: %2")
-                             .arg(successCount)
-                             .arg(results.size() - successCount));
 
+    if (failCount > 0) {
+        QMessageBox::warning(this, "处理完成（存在失败）",
+                             QString("批量固化完成！\n成功: %1\n失败: %2\n\n失败详情:%3")
+                             .arg(successCount)
+                             .arg(failCount)
+                             .arg(failDetails));
+    } else {
+        QMessageBox::information(this, "完成",
+                                 QString("批量固化完成！\n成功: %1\n失败: 0")
+                                 .arg(successCount));
+    }
     for (const auto& r : results) {
         if (r.success) {
             lastOutputDir_ = QString::fromUtf8(pathToString(r.outputPath.parent_path()).c_str());

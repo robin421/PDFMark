@@ -68,21 +68,27 @@ QImage PdfRenderer::rasterizePage(FPDF_PAGE page, int dpi) {
             throw PdfError("FPDFBitmap_GetBuffer returned null or invalid stride");
         }
 
-        // QImage::Format_RGB32: little-endian = B,G,R,0
-        const uchar* ubuf = static_cast<const uchar*>(buffer);
-        QImage result = QImage(ubuf, widthPx, heightPx, stride, QImage::Format_RGB32).copy();
+        // Hand over ownership of FPDF_BITMAP buffer directly to QImage without deep copying.
+        // The cleanup callback automatically destroys the FPDF_BITMAP when QImage goes out of scope.
+        auto cleanup = [](void* info) {
+            if (info) {
+                FPDFBitmap_Destroy(static_cast<FPDF_BITMAP>(info));
+            }
+        };
+
+        uchar* ubuf = static_cast<uchar*>(buffer);
+        QImage result(ubuf, widthPx, heightPx, stride, QImage::Format_RGB32, cleanup, bitmap);
 
         if (result.isNull()) {
-            throw PdfError("QImage copy() returned null image");
+            FPDFBitmap_Destroy(bitmap);
+            throw PdfError("Failed to wrap FPDF_BITMAP into QImage");
         }
 
         return result;
     } catch (...) {
-        // Ensure bitmap is always freed, then re-throw
         FPDFBitmap_Destroy(bitmap);
         throw;
     }
 }
-
 
 } // namespace pdfmark

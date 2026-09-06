@@ -41,6 +41,10 @@ void PdfWriter::appendRasterPage(FPDF_DOCUMENT doc,
 
     // JPEG compress the image in memory
     QByteArray jpegData;
+    qsizetype estimatedBytes = (static_cast<qsizetype>(image.width()) * image.height() * 4) / 4;
+    if (estimatedBytes > 0) {
+        jpegData.reserve(estimatedBytes);
+    }
     QBuffer buffer(&jpegData);
     if (!buffer.open(QIODevice::WriteOnly)) {
         FPDF_ClosePage(page);
