@@ -38,7 +38,10 @@ static uint64_t getUniqueTempId() {
 
 TaskManager::TaskManager(QObject* parent)
     : QObject(parent),
-      pool_(QThreadPool::globalInstance()) {}
+      pool_(QThreadPool::globalInstance()) {
+    qRegisterMetaType<FileResult>("FileResult");
+    qRegisterMetaType<std::vector<FileResult>>("std::vector<FileResult>");
+}
 
 TaskManager::~TaskManager() {
     cancel();
