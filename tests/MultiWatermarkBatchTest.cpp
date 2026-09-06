@@ -91,9 +91,9 @@ void testMultiWatermarkBatch() {
     // Sanitized names that the TaskManager should produce.
     // Sanitized names organized in per-PDF subdirectories
     std::vector<fs::path> expectedOutputs = {
-        workDir / "sample_input" / "机密-张三.pdf",
-        workDir / "sample_input" / "内部文件-李四.pdf",
-        workDir / "sample_input" / "部门_审核_王五.pdf",
+        workDir / "sample_input" / stringToPath("机密-张三.pdf"),
+        workDir / "sample_input" / stringToPath("内部文件-李四.pdf"),
+        workDir / "sample_input" / stringToPath("部门_审核_王五.pdf"),
     };
 
     // Drive the TaskManager synchronously.
@@ -137,8 +137,8 @@ void testMultiWatermarkBatch() {
         assert(fs::file_size(r.outputPath) > 0);
         // Verify subdirectory structure from result path
         fs::path parent = r.outputPath.parent_path();
-        std::string parentName = parent.filename().string();
-        std::string fileName = r.outputPath.filename().string();
+        std::string parentName = pathToString(parent.filename());
+        std::string fileName = pathToString(r.outputPath.filename());
         assert(parentName == "sample_input");
         assert(fileName == sanitizeFilename(r.watermarkText) + ".pdf");
     }
@@ -150,7 +150,7 @@ void testMultiWatermarkBatch() {
     for (const auto& entry : fs::directory_iterator(subdir)) {
         if (entry.is_regular_file() &&
             entry.path().extension() == ".pdf" &&
-            entry.path().filename().string().rfind("._", 0) != 0) {
+            pathToString(entry.path().filename()).rfind("._", 0) != 0) {
             pdfsInSubdir.push_back(entry.path());
         }
     }
@@ -210,7 +210,7 @@ void testMultiWatermarkBatch() {
     }
     assert(subdirs2.size() == 2);
     std::unordered_set<std::string> subdirNames;
-    for (const auto& d : subdirs2) subdirNames.insert(d.filename().string());
+    for (const auto& d : subdirs2) subdirNames.insert(pathToString(d.filename()));
     assert(subdirNames.count("doc_A") == 1);
     assert(subdirNames.count("doc_B") == 1);
 
@@ -220,7 +220,7 @@ void testMultiWatermarkBatch() {
         for (const auto& e : fs::directory_iterator(d)) {
             if (e.is_regular_file() &&
                 e.path().extension() == ".pdf" &&
-                e.path().filename().string().rfind("._", 0) != 0) {
+                pathToString(e.path().filename()).rfind("._", 0) != 0) {
                 entries.push_back(e.path());
             }
         }
