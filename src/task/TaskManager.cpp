@@ -341,71 +341,109 @@ void TaskManager::start() {
         jobs.push_back({st.input, out, st.config, static_cast<int>(i + 1)});
     }
 
-    auto completedCount = std::make_shared<std::atomic<int>>(0);
-    auto sharedResults = std::make_shared<std::vector<FileResult>>();
-    auto resultsLock = std::make_shared<std::mutex>();
 
-    for (const auto& job : jobs) {
-        pool_->start([this, job, totalSubtasks, completedCount, sharedResults, resultsLock]() {
+    // Pre-count pages per job (on the caller thread, before worker starts).
+    std::vector<int> jobPageCounts(jobs.size(), 0);
+    for (size_t i = 0; i < jobs.size(); ++i) {
+        try {
+            auto srcDocRef = PdfDocument::open(jobs[i].input);
+            jobPageCounts[i] = PdfDocument::pageCount(srcDocRef.first.get());
+        } catch (...) {
+            jobPageCounts[i] = 1; // Fallback to 1 page if unable to read count.
+        }
+    }
+    int totalPageCount = 0;
+    for (int pc : jobPageCounts) { totalPageCount += pc; }
+    // Single-worker serial execution: tasks run one-by-one on a dedicated thread,
+    // eliminating all cross-worker signal races (progress bars no longer jump).
+    QThread* workerThread = QThread::create([this, jobs, jobPageCounts, totalPageCount]() {
+        int totalSubtasks = static_cast<int>(jobs.size());
+        for (int idx = 0; idx < totalSubtasks; ++idx) {
             if (cancelRequested_.load()) {
-                FileResult res;
-                res.inputPath = job.input;
-                res.outputPath = job.output;
-                res.watermarkText = job.config.text;
-                res.success = false;
-                res.errorMessage = "Operation cancelled";
-
-                {
-                    std::lock_guard<std::mutex> lk(*resultsLock);
-                    sharedResults->push_back(res);
-                }
-                int done = completedCount->fetch_add(1, std::memory_order_relaxed) + 1;
-                emit fileFinished(res);
-                emit fileProgress(done, totalSubtasks);
-
-                if (done == totalSubtasks) {
-                    std::vector<FileResult> fin;
+                // Emit cancelled results for all remaining tasks.
+                for (int k = idx; k < totalSubtasks; ++k) {
+                    FileResult res;
+                    res.inputPath = jobs[k].input;
+                    res.outputPath = jobs[k].output;
+                    res.watermarkText = jobs[k].config.text;
+                    res.success = false;
+                    res.errorMessage = "Operation cancelled";
                     {
-                        std::lock_guard<std::mutex> lk(*resultsLock);
-                        fin = *sharedResults;
-                        results_ = fin;
+                        std::lock_guard<std::mutex> lk(mutex_);
+                        results_.push_back(res);
                     }
+                    emit fileFinished(res);
+                    // Emit page-grain total progress so the bar stays monotonic.
+                    int completedPages = 0;
+                    for (int t = 0; t < idx; ++t) {
+                        completedPages += jobPageCounts[t];
+                    }
+                    int pct = totalPageCount > 0 ? (completedPages * 100 / totalPageCount) : 0;
+                    emit fileProgress(pct, 100);
+                }
+                {
+                    std::lock_guard<std::mutex> lk(mutex_);
+                    std::vector<FileResult> fin = results_;
                     running_.store(false);
                     emit allFinished(fin);
                 }
                 return;
             }
 
+            const auto& job = jobs[idx];
             QString fileName = QString::fromUtf8(pathToString(job.input.filename()).c_str());
-            QString displayName = QString("%1 [%2]").arg(fileName).arg(QString::fromUtf8(job.config.text.c_str()));
-            emit fileStarted(displayName, job.index, totalSubtasks);
+            QString displayName = QString("%1 [%2]")
+                .arg(fileName)
+                .arg(QString::fromUtf8(job.config.text.c_str()));
+            emit fileStarted(displayName, idx + 1, totalSubtasks);
 
-            auto pageCb = [this, displayName](int cur, int tot) {
+            // Page-grain progress: emits both page-level (for current file) and
+            // page-grain total (for totalProgressBar_). total is strictly monotonic.
+            auto pageCb = [this, displayName, idx, jobPageCounts, totalPageCount](int cur, int tot) {
+                int completedPages = 0;
+                for (int t = 0; t < idx; ++t) { completedPages += jobPageCounts[t]; }
+                completedPages += cur;
+                int pct = totalPageCount > 0 ? (completedPages * 100 / totalPageCount) : 0;
                 emit pageProgress(displayName, cur, tot);
+                emit fileProgress(pct, 100);
             };
 
-            FileResult res = processSingleFile(job.input, job.output, job.config, pageCb);
-
+            FileResult res;
+            try {
+                res = processSingleFile(job.input, job.output, job.config, pageCb);
+            } catch (const std::exception& e) {
+                res.inputPath = job.input;
+                res.outputPath = job.output;
+                res.watermarkText = job.config.text;
+                res.success = false;
+                res.errorMessage = e.what();
+                qCritical() << "Error processing file" << displayName << ":" << e.what();
+            } catch (...) {
+                res.inputPath = job.input;
+                res.outputPath = job.output;
+                res.watermarkText = job.config.text;
+                res.success = false;
+                res.errorMessage = "Unknown error during processing";
+                qCritical() << "Unknown error processing file" << displayName;
+            }
             {
-                std::lock_guard<std::mutex> lk(*resultsLock);
-                sharedResults->push_back(res);
+                std::lock_guard<std::mutex> lk(mutex_);
+                results_.push_back(res);
             }
-            int done = completedCount->fetch_add(1, std::memory_order_relaxed) + 1;
             emit fileFinished(res);
-            emit fileProgress(done, totalSubtasks);
+        }
 
-            if (done == totalSubtasks) {
-                std::vector<FileResult> fin;
-                {
-                    std::lock_guard<std::mutex> lk(*resultsLock);
-                    fin = *sharedResults;
-                    results_ = fin;
-                }
-                running_.store(false);
-                emit allFinished(fin);
-            }
-        });
-    }
+        std::vector<FileResult> fin;
+        {
+            std::lock_guard<std::mutex> lk(mutex_);
+            fin = results_;
+        }
+        running_.store(false);
+        emit allFinished(fin);
+    });
+
+    workerThread->start();
+    connect(workerThread, &QThread::finished, workerThread, &QThread::deleteLater);
 }
 
 } // namespace pdfmark
