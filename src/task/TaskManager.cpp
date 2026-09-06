@@ -239,64 +239,79 @@ void TaskManager::start() {
 
     // Launch worker thread
     pool_->start([this]() {
-        std::vector<FileSubtask> activeSubtasks;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (!subtasks_.empty()) {
-                activeSubtasks = subtasks_;
-            } else {
-                std::vector<WatermarkConfig> activeConfigs = configs_.empty() ? std::vector<WatermarkConfig>{config_} : configs_;
-                for (const auto& f : queue_) {
-                    for (const auto& c : activeConfigs) {
-                        activeSubtasks.push_back({f, c});
-                    }
-                }
-            }
-            results_.clear();
-        }
-        int totalSubtasks = static_cast<int>(activeSubtasks.size());
-        int completed = 0;
-
-        for (size_t idx = 0; idx < activeSubtasks.size(); ++idx) {
-            if (cancelRequested_.load()) {
-                break;
-            }
-
-            const auto& task = activeSubtasks[idx];
-            const auto& filePath = task.input;
-            const auto& cfg = task.config;
-            // Use UTF-8 → QString to avoid GBK/ACP corruption on Chinese Windows
-            QString fileName = QString::fromUtf8(filePath.filename().u8string().c_str());
-            QString displayName = QString::fromUtf8("%1 [%2]")
-                .arg(fileName)
-                .arg(QString::fromUtf8(cfg.text));
-
-            fs::path outPath = outputPathFor(filePath, cfg.text);
-
-            auto pageCb = [this, displayName](int cur, int tot) {
-                emit pageProgress(displayName, cur, tot);
-            };
-
-            FileResult res = processSingleFile(filePath, outPath, cfg, pageCb);
-
+        try {
+            std::vector<FileSubtask> activeSubtasks;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                results_.push_back(res);
+                if (!subtasks_.empty()) {
+                    activeSubtasks = subtasks_;
+                } else {
+                    std::vector<WatermarkConfig> activeConfigs = configs_.empty() ? std::vector<WatermarkConfig>{config_} : configs_;
+                    for (const auto& f : queue_) {
+                        for (const auto& c : activeConfigs) {
+                            activeSubtasks.push_back({f, c});
+                        }
+                    }
+                }
+                results_.clear();
+            }
+            int totalSubtasks = static_cast<int>(activeSubtasks.size());
+            int completed = 0;
+
+            for (size_t idx = 0; idx < activeSubtasks.size(); ++idx) {
+                if (cancelRequested_.load()) {
+                    break;
+                }
+
+                const auto& task = activeSubtasks[idx];
+                const auto& filePath = task.input;
+                const auto& cfg = task.config;
+                // Use UTF-8 → QString to avoid GBK/ACP corruption on Chinese Windows
+                QString fileName = QString::fromUtf8(filePath.filename().u8string().c_str());
+                QString displayName = QString::fromUtf8("%1 [%2]")
+                    .arg(fileName)
+                    .arg(QString::fromUtf8(cfg.text));
+
+                fs::path outPath = outputPathFor(filePath, cfg.text);
+
+                auto pageCb = [this, displayName](int cur, int tot) {
+                    emit pageProgress(displayName, cur, tot);
+                };
+
+                FileResult res = processSingleFile(filePath, outPath, cfg, pageCb);
+
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    results_.push_back(res);
+                }
+
+                completed++;
+                emit fileFinished(res);
+                emit fileProgress(completed, totalSubtasks);
             }
 
-            completed++;
-            emit fileFinished(res);
-            emit fileProgress(completed, totalSubtasks);
-        }
+            std::vector<FileResult> finalResults;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                finalResults = results_;
+            }
 
-        std::vector<FileResult> finalResults;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            finalResults = results_;
+            running_.store(false);
+            emit allFinished(finalResults);
+        } catch (const std::exception& e) {
+            // Catch any exception that propagates from processSingleFile or signal emission
+            // to prevent std::terminate() in QThreadPool worker.
+            std::vector<FileResult> emptyResults;
+            running_.store(false);
+            // Log to file via Qt message handler (thread-safe)
+            qCritical() << "TaskManager worker thread crashed:" << e.what();
+            emit allFinished(emptyResults);
+        } catch (...) {
+            qCritical() << "TaskManager worker thread crashed: unknown exception";
+            running_.store(false);
+            std::vector<FileResult> emptyResults;
+            emit allFinished(emptyResults);
         }
-
-        running_.store(false);
-        emit allFinished(finalResults);
     });
 }
 
