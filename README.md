@@ -2,7 +2,7 @@
 
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](.github/workflows/windows-build.yml)
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://isocpp.org/std/the-standard)
-[![Qt 6](https://img.shields.io/badge/Qt-6.6-green.svg)](https://www.qt.io)
+[![Qt 6](https://img.shields.io/badge/Qt-6.2-green.svg)](https://www.qt.io)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20x64-lightgrey)](#构建)
 
 > 将水印**彻底烧录**进 PDF 的每一页像素层——既抗 OCR 提取，又消除原始矢量/文本层隐患。
@@ -26,13 +26,11 @@
 
 ### 通用前置依赖
 
-- **Qt 6.6+** (Core, Gui, Widgets, Test)
-- **CMake 3.20+**
+- **Qt 6.2+** (Core, Gui, Widgets, Test) — Windows 打包使用 6.2.4 LTS，兼容 Win7 SP1
 - **C++20 编译器**：AppleClang 15+ / MSVC 2022 / GCC 11+
 - **PDFium**：`bblanchon/pdfium-binaries` chromium/8035 标签
 - **macOS**：`brew install qt cmake ninja`
-- **Windows**：MSVC 2022 + Qt 6.6 (`win64_msvc2019_64`) + Ninja
-
+- **Windows**：MSVC 2022 + Qt 6.2 (`win64_msvc2019_64`) + Ninja
 ### 一键构建（macOS）
 
 ```bash
