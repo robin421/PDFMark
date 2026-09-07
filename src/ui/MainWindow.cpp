@@ -3,6 +3,7 @@
 #include "ui/PasswordDialog.h"
 #include "diagnostics/Diagnostics.h"
 #include "pdf/PdfDocument.h"
+#include "watermark/WatermarkRenderer.h"
 #include "updater/AutoUpdater.h"
 #include "updater/UpdateDialog.h"
 
@@ -180,7 +181,16 @@ void MainWindow::setupUi() {
 
     addWatermarkBtn_ = new QPushButton("+ 添加水印", rightContainer);
     addWatermarkBtn_->setStyleSheet("padding: 6px 14px; font-weight: bold;");
-    rightLayout->addWidget(addWatermarkBtn_);
+    auto* previewBtn = new QPushButton("🔍 预览效果", rightContainer);
+    previewBtn->setStyleSheet("padding: 6px 14px;");
+    previewBtn->setToolTip("预览当前水印样式在 PDF 页面上的实际效果");
+    connect(previewBtn, &QPushButton::clicked, this, &MainWindow::onPreviewWatermark);
+    auto* btnRow = new QHBoxLayout();
+    btnRow->setSpacing(6);
+    btnRow->addWidget(addWatermarkBtn_);
+    btnRow->addWidget(previewBtn);
+    btnRow->addStretch();
+    rightLayout->addLayout(btnRow);
 
     // Watermark Params Group (shared style params)
     auto* paramGroup = new QGroupBox("水印样式设置", rightContainer);
@@ -198,6 +208,41 @@ void MainWindow::setupUi() {
     depthValueLabel_->setFixedWidth(75);
     grid->addWidget(depthSlider_, row, 1);
     grid->addWidget(depthValueLabel_, row, 2);
+    row++;
+
+    // Watermark Rotation (degrees)
+    grid->addWidget(new QLabel("倾斜角度:"), row, 0);
+    rotationSpin_ = new QDoubleSpinBox(paramGroup);
+    rotationSpin_->setRange(-90.0, 90.0);
+    rotationSpin_->setSingleStep(5.0);
+    rotationSpin_->setValue(-35.0);
+    rotationSpin_->setSuffix("°");
+    rotationSpin_->setToolTip("水印倾斜角度，支持 -90° 到 90°，默认 -35°（左下到右上）");
+    grid->addWidget(rotationSpin_, row, 1, 1, 2);
+    row++;
+
+    // Watermark Font Family
+    grid->addWidget(new QLabel("水印字体:"), row, 0);
+    fontCombo_ = new QFontComboBox(paramGroup);
+    fontCombo_->setCurrentFont(QFont("Arial"));
+    fontCombo_->setToolTip("选择水印文字所使用的字体");
+    grid->addWidget(fontCombo_, row, 1, 1, 2);
+    row++;
+
+    // Font Style: Bold & Italic
+    grid->addWidget(new QLabel("字体样式:"), row, 0);
+    auto* styleWidget = new QWidget(paramGroup);
+    auto* styleLayout = new QHBoxLayout(styleWidget);
+    styleLayout->setContentsMargins(0, 0, 0, 0);
+    styleLayout->setSpacing(12);
+    boldCheck_ = new QCheckBox("加粗", styleWidget);
+    boldCheck_->setChecked(true);
+    italicCheck_ = new QCheckBox("斜体", styleWidget);
+    italicCheck_->setChecked(false);
+    styleLayout->addWidget(boldCheck_);
+    styleLayout->addWidget(italicCheck_);
+    styleLayout->addStretch();
+    grid->addWidget(styleWidget, row, 1, 1, 2);
     row++;
 
     // Performance mode
@@ -323,12 +368,14 @@ void MainWindow::setupConnections() {
 WatermarkConfig MainWindow::currentConfig() const {
     WatermarkConfig cfg;
     cfg.fontSizePt = 24;
-    cfg.rotationDegrees = -35.0;
+    cfg.rotationDegrees = rotationSpin_->value();
+    cfg.fontFamily = fontCombo_->currentFont().family().toStdString();
+    cfg.fontBold = boldCheck_->isChecked();
+    cfg.fontItalic = italicCheck_->isChecked();
     cfg.dpi = 200;
     cfg.jpegQuality = 85;
     cfg.colorHex = "#808080";
     cfg.opacity = depthSlider_->value() / 100.0;
-
     // Get first visible text row, or saved text for currently selected file
     for (int i = 0; i < watermarkLayout_->count(); ++i) {
         auto* item = watermarkLayout_->itemAt(i);
@@ -348,21 +395,69 @@ WatermarkConfig MainWindow::currentConfig() const {
 
 void MainWindow::saveCurrentWatermarks() {
     if (currentSelectedFile_.isEmpty()) return;
-    std::vector<QString> list;
+    std::vector<WatermarkConfig> configs;
     for (int i = 0; i < watermarkLayout_->count(); ++i) {
         auto* item = watermarkLayout_->itemAt(i);
         if (auto* row = qobject_cast<WatermarkRow*>(item->widget())) {
             QString t = row->text().trimmed();
             if (!t.isEmpty()) {
-                list.push_back(t);
+                WatermarkConfig cfg;
+                cfg.text = t.toStdString();
+                // Inherit style from current per-PDF config or use defaults
+                auto itStyle = perPdfConfigMap_.find(currentSelectedFile_);
+                if (itStyle != perPdfConfigMap_.end()) {
+                    cfg.fontFamily = itStyle->second.fontFamily;
+                    cfg.fontBold = itStyle->second.fontBold;
+                    cfg.fontItalic = itStyle->second.fontItalic;
+                    cfg.fontSizePt = itStyle->second.fontSizePt;
+                    cfg.rotationDegrees = itStyle->second.rotationDegrees;
+                    cfg.colorHex = itStyle->second.colorHex;
+                    cfg.opacity = itStyle->second.opacity;
+                    cfg.dpi = itStyle->second.dpi;
+                    cfg.jpegQuality = itStyle->second.jpegQuality;
+                } else {
+                    // Defaults from live UI controls
+                    cfg.fontFamily = fontCombo_->currentFont().family().toStdString();
+                    cfg.fontBold = boldCheck_->isChecked();
+                    cfg.fontItalic = italicCheck_->isChecked();
+                    cfg.fontSizePt = 24;
+                    cfg.rotationDegrees = rotationSpin_->value();
+                    cfg.colorHex = "#808080";
+                    cfg.opacity = depthSlider_->value() / 100.0;
+                    cfg.dpi = 200;
+                    cfg.jpegQuality = 85;
+                }
+                configs.push_back(cfg);
             }
         }
     }
-    fileWatermarks_[currentSelectedFile_] = list;
+    fileWatermarkConfigs_[currentSelectedFile_] = configs;
+    // Sync current UI style settings into perPdfConfigMap_ so that buildAllConfigs uses live values
+    auto itSync = perPdfConfigMap_.find(currentSelectedFile_);
+    if (itSync != perPdfConfigMap_.end()) {
+        itSync->second.fontFamily = fontCombo_->currentFont().family().toStdString();
+        itSync->second.fontBold = boldCheck_->isChecked();
+        itSync->second.fontItalic = italicCheck_->isChecked();
+        itSync->second.fontSizePt = 24;
+        itSync->second.rotationDegrees = rotationSpin_->value();
+        itSync->second.colorHex = "#808080";
+        itSync->second.opacity = depthSlider_->value() / 100.0;
+        itSync->second.dpi = 200;
+        itSync->second.jpegQuality = 85;
+    } else {
+        WatermarkConfig defaultCfg;
+        defaultCfg.fontFamily = fontCombo_->currentFont().family().toStdString();
+        defaultCfg.fontBold = boldCheck_->isChecked();
+        defaultCfg.fontItalic = italicCheck_->isChecked();
+        defaultCfg.fontSizePt = 24;
+        defaultCfg.rotationDegrees = rotationSpin_->value();
+        defaultCfg.colorHex = "#808080";
+        defaultCfg.opacity = depthSlider_->value() / 100.0;
+        defaultCfg.dpi = 200;
+        defaultCfg.jpegQuality = 85;
+        perPdfConfigMap_[currentSelectedFile_] = defaultCfg;
+    }
 }
-
-
-
 void MainWindow::loadWatermarksForSelectedFile() {
     // Clear existing rows
     QLayoutItem* child;
@@ -378,14 +473,28 @@ void MainWindow::loadWatermarksForSelectedFile() {
         return;
     }
     addWatermarkBtn_->setEnabled(true);
+    // Sync style controls from per-PDF config or defaults
+    auto itStyle = perPdfConfigMap_.find(currentSelectedFile_);
+    if (itStyle != perPdfConfigMap_.end()) {
+        const auto& cfg = itStyle->second;
+        rotationSpin_->setValue(cfg.rotationDegrees);
+        fontCombo_->setCurrentFont(QFont(cfg.fontFamily.empty() ? "Arial" : cfg.fontFamily.c_str()));
+        boldCheck_->setChecked(cfg.fontBold);
+        italicCheck_->setChecked(cfg.fontItalic);
+    } else {
+        rotationSpin_->setValue(-35.0);
+        fontCombo_->setCurrentFont(QFont("Arial"));
+        boldCheck_->setChecked(true);
+        italicCheck_->setChecked(false);
+    }
 
-    // Load existing watermarks, or leave empty
-    auto it = fileWatermarks_.find(currentSelectedFile_);
-    const std::vector<QString> emptyList;
-    const auto& wms = (it != fileWatermarks_.end()) ? it->second : emptyList;
-    for (const auto& wm : wms) {
+    // Load existing watermark configs, or leave empty
+    auto it = fileWatermarkConfigs_.find(currentSelectedFile_);
+    const std::vector<WatermarkConfig> emptyList;
+    const auto& cfgs = (it != fileWatermarkConfigs_.end()) ? it->second : emptyList;
+    for (const auto& cfg : cfgs) {
         int idx = nextWatermarkIndex_++;
-        auto* row = new WatermarkRow(wm, idx, watermarkContainer_);
+        auto* row = new WatermarkRow(QString::fromStdString(cfg.text), idx, watermarkContainer_);
         connect(row, &WatermarkRow::textChanged, this, &MainWindow::onWatermarkTextChanged);
         connect(row, &WatermarkRow::removeRequested, this, &MainWindow::removeWatermarkRow);
         watermarkLayout_->addWidget(row);
@@ -562,7 +671,8 @@ void MainWindow::dropEvent(QDropEvent* event) {
 void MainWindow::onClearFiles() {
     if (taskManager_.isRunning()) return;
     fileTable_->setRowCount(0);
-    fileWatermarks_.clear();
+    fileWatermarkConfigs_.clear();
+    perPdfConfigMap_.clear();
     currentSelectedFile_.clear();
     taskManager_.clear();
     pageProgressBar_->setValue(0);
@@ -590,6 +700,10 @@ void MainWindow::updateUiState(bool running) {
     depthSlider_->setEnabled(!running);
     perfCombo_->setEnabled(!running);
     outputDirEdit_->setEnabled(!running);
+    rotationSpin_->setEnabled(!running);
+    fontCombo_->setEnabled(!running);
+    boldCheck_->setEnabled(!running);
+    italicCheck_->setEnabled(!running);
 }
 
 void MainWindow::onRemoveSelectedFile() {
@@ -607,7 +721,8 @@ void MainWindow::onRemoveSelectedFile() {
         if (row < 0 || row >= fileTable_->rowCount()) continue;
         QString filePath = fileTable_->item(row, 3)->text();
         fileTable_->removeRow(row);
-        fileWatermarks_.erase(filePath);
+        fileWatermarkConfigs_.erase(filePath);
+        perPdfConfigMap_.erase(filePath);
         if (currentSelectedFile_ == filePath) {
             currentSelectedFile_.clear();
         }
@@ -624,12 +739,9 @@ void MainWindow::onRemoveSelectedFile() {
     statusLabel_->setText(QString("已移除 %1 个文件。剩余 %2 个文件。")
         .arg(selectedRows.size()).arg(remaining));
 }
-
 std::vector<TaskManager::FileSubtask> MainWindow::buildAllConfigs(bool onlySelected) {
     saveCurrentWatermarks();
     std::vector<TaskManager::FileSubtask> subtasks;
-
-    double opacity = depthSlider_->value() / 100.0;
 
     for (int r = 0; r < fileTable_->rowCount(); ++r) {
         if (onlySelected) {
@@ -642,24 +754,12 @@ std::vector<TaskManager::FileSubtask> MainWindow::buildAllConfigs(bool onlySelec
         if (filePath.isEmpty()) continue;
         fs::path p = qstringToPath(filePath);
 
-        auto it = fileWatermarks_.find(filePath);
-        if (it == fileWatermarks_.end() || it->second.empty()) {
+        auto it = fileWatermarkConfigs_.find(filePath);
+        if (it == fileWatermarkConfigs_.end() || it->second.empty()) {
             continue;
         }
-        const auto& lines = it->second;
-        for (const auto& line : lines) {
-            QString trimmed = line.trimmed();
-            if (trimmed.isEmpty()) continue;
-
-            WatermarkConfig cfg;
-            cfg.text = trimmed.toStdString();
-            cfg.fontSizePt = 24;
-            cfg.rotationDegrees = -35.0;
-            cfg.dpi = 200;
-            cfg.jpegQuality = 85;
-            cfg.colorHex = "#808080";
-            cfg.opacity = opacity;
-
+        for (const auto& cfg : it->second) {
+            if (cfg.text.empty()) continue;
             subtasks.push_back({ p, cfg });
         }
     }
@@ -821,6 +921,51 @@ void MainWindow::onPasswordRequired(const QString& filePath) {
         knownPasswords_[filePath.toStdString()] = dlg.password().toStdString();
         taskManager_.setPasswords(knownPasswords_);
     }
+}
+void MainWindow::onPreviewWatermark() {
+    // Get current config
+    WatermarkConfig cfg = currentConfig();
+    if (cfg.text.empty()) {
+        cfg.text = "机密文件 请勿外传";
+    }
+
+    // Render 600x800 preview (approx standard 3:4 portrait page proportion)
+    QImage previewImg = WatermarkRenderer::renderPreview(600, 800, cfg);
+
+    auto* dlg = new QDialog(this);
+    dlg->setWindowTitle("水印效果实时预览");
+    dlg->resize(640, 860);
+    auto* layout = new QVBoxLayout(dlg);
+    layout->setContentsMargins(12, 12, 12, 12);
+    layout->setSpacing(8);
+
+    auto* infoLabel = new QLabel(
+        QString("水印文字：%1   倾斜：%2°   字体：%3   深浅：%4%")
+            .arg(QString::fromUtf8(cfg.text.c_str()))
+            .arg(cfg.rotationDegrees)
+            .arg(QString::fromStdString(cfg.fontFamily))
+            .arg(static_cast<int>(cfg.opacity * 100)),
+        dlg
+    );
+    infoLabel->setStyleSheet("color: #444; font-size: 13px;");
+    layout->addWidget(infoLabel);
+
+    auto* imgLabel = new QLabel(dlg);
+    imgLabel->setFrameShape(QFrame::Box);
+    imgLabel->setAlignment(Qt::AlignCenter);
+    imgLabel->setPixmap(QPixmap::fromImage(previewImg));
+    imgLabel->setStyleSheet("background-color: white; border: 1px solid #ccc;");
+    layout->addWidget(imgLabel, 1);
+
+    auto* closeBtn = new QPushButton("关闭", dlg);
+    closeBtn->setStyleSheet("padding: 6px 20px;");
+    connect(closeBtn, &QPushButton::clicked, dlg, &QDialog::accept);
+    auto* btnBox = new QHBoxLayout();
+    btnBox->addStretch();
+    btnBox->addWidget(closeBtn);
+    layout->addLayout(btnBox);
+
+    dlg->exec();
 }
 
 

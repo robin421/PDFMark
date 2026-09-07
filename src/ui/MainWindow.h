@@ -17,6 +17,9 @@
 #include <QVBoxLayout>
 #include <QDesktopServices>
 #include <QUrl>
+#include <QFontComboBox>
+#include <QDoubleSpinBox>
+#include <QCheckBox>
 
 namespace pdfmark {
 
@@ -76,6 +79,9 @@ protected:
     void addWatermarkRow();
     void removeWatermarkRow(int index);
     void onWatermarkTextChanged();
+    void onPreviewWatermark();
+
+    // Watermark row management
 
     // Auto-update
     void onCheckForUpdates();
@@ -109,9 +115,14 @@ private:
     QLabel* depthValueLabel_ = nullptr;
     QComboBox* perfCombo_ = nullptr;
     QLineEdit* outputDirEdit_ = nullptr;
-
+    // New font/rotation controls
+    QDoubleSpinBox* rotationSpin_ = nullptr;
+    QFontComboBox* fontCombo_ = nullptr;
+    QCheckBox* boldCheck_ = nullptr;
+    QCheckBox* italicCheck_ = nullptr;
     QProgressBar* pageProgressBar_ = nullptr;
     QProgressBar* totalProgressBar_ = nullptr;
+    QDialog* previewDialog_ = nullptr;
     QLabel* statusLabel_ = nullptr;
     QPushButton* startAllBtn_ = nullptr;
     QPushButton* startSelectedBtn_ = nullptr;
@@ -120,8 +131,10 @@ private:
     TaskManager taskManager_;
     std::unordered_map<std::string, std::string> knownPasswords_;
 
-    // Per-file watermark map: filePath → list of watermark text strings
-    std::unordered_map<QString, std::vector<QString>> fileWatermarks_;
+    // Per-file watermark map: filePath → list of full WatermarkConfig (text + style)
+    std::unordered_map<QString, std::vector<WatermarkConfig>> fileWatermarkConfigs_;
+    // Per-file style overrides: filePath → WatermarkConfig used as style template for new rows
+    std::unordered_map<QString, WatermarkConfig> perPdfConfigMap_;
     QString currentSelectedFile_;  // currently displayed PDF path
 
     int nextWatermarkIndex_ = 0;  // monotonic index for WatermarkRow identity

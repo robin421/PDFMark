@@ -9,6 +9,9 @@ namespace pdfmark {
 struct WatermarkConfig {
     std::string text = "Confidential";
     int fontSizePt = 24;              // Watermark font size in points
+    std::string fontFamily = "Arial"; // Font family (Arial, Times New Roman, etc.)
+    bool fontBold = true;             // Bold flag
+    bool fontItalic = false;          // Italic flag
     double opacity = 0.12;             // 0.0 to 1.0 (default 12%)
     std::string colorHex = "#BEBEBE"; // Default light gray
     double rotationDegrees = -35.0;    // -35 deg tilts from bottom-left to top-right

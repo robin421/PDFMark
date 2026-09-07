@@ -87,12 +87,11 @@ void testMultiWatermarkBatch() {
         configs.push_back(cfg);
     }
 
-    // Sanitized names that the TaskManager should produce.
-    // Sanitized names organized in per-PDF subdirectories
+    // Sanitized names organized in per-watermark subdirectories, files keep original PDF name
     std::vector<fs::path> expectedOutputs = {
-        workDir / "sample_input" / stringToPath("机密-张三.pdf"),
-        workDir / "sample_input" / stringToPath("内部文件-李四.pdf"),
-        workDir / "sample_input" / stringToPath("部门_审核_王五.pdf"),
+        workDir / "机密-张三" / "sample_input.pdf",
+        workDir / "内部文件-李四" / "sample_input.pdf",
+        workDir / "部门_审核_王五" / "sample_input.pdf",
     };
 
     // Drive the TaskManager synchronously.
@@ -140,23 +139,18 @@ void testMultiWatermarkBatch() {
         fs::path parent = r.outputPath.parent_path();
         std::string parentName = pathToString(parent.filename());
         std::string fileName = pathToString(r.outputPath.filename());
-        assert(parentName == "sample_input");
-        assert(fileName == sanitizeFilename(r.watermarkText) + ".pdf");
+        assert(parentName == sanitizeFilename(r.watermarkText));
+        assert(fileName == "sample_input.pdf");
     }
 
-    // Verify directory structure: subdirectory per PDF
-    fs::path subdir = workDir / "sample_input";
-    assert(fs::is_directory(subdir));
-    std::vector<fs::path> pdfsInSubdir;
-    for (const auto& entry : fs::directory_iterator(subdir)) {
-        if (entry.is_regular_file() &&
-            entry.path().extension() == ".pdf" &&
-            pathToString(entry.path().filename()).rfind("._", 0) != 0) {
-            pdfsInSubdir.push_back(entry.path());
-        }
+    // Verify directory structure: subdirectory per watermark
+    for (const auto& wm : rawWatermarks) {
+        fs::path subdir = workDir / stringToPath(sanitizeFilename(wm));
+        assert(fs::is_directory(subdir));
+        fs::path expectedPdf = subdir / "sample_input.pdf";
+        assert(fs::exists(expectedPdf));
+        assert(fs::file_size(expectedPdf) > 0);
     }
-    assert(static_cast<int>(pdfsInSubdir.size()) == static_cast<int>(configs.size()));
-    // ── Advanced: 2 PDFs × 2 watermarks → 2 subdirs, 4 total files ──
     std::cout << "[RUN] testMultiWatermarkBatch (multi-PDF)\n";
 
     fs::path workDir2 = workDir.parent_path() / "multi_wm_e2e_2pdf";
@@ -202,18 +196,18 @@ void testMultiWatermarkBatch() {
     const auto& results2 = mgr2.results();
     assert(results2.size() == 4); // 2 files × 2 watermarks
 
-    // Verify exactly 2 subdirectories
+    // Verify exactly 2 subdirectories (one per watermark)
     std::vector<fs::path> subdirs2;
     for (const auto& entry : fs::directory_iterator(workDir2)) {
         if (entry.is_directory()) subdirs2.push_back(entry.path());
     }
     assert(subdirs2.size() == 2);
-    std::unordered_set<std::string> subdirNames;
-    for (const auto& d : subdirs2) subdirNames.insert(pathToString(d.filename()));
-    assert(subdirNames.count("doc_A") == 1);
-    assert(subdirNames.count("doc_B") == 1);
+    std::unordered_set<std::string> subdirNames2;
+    for (const auto& d : subdirs2) subdirNames2.insert(pathToString(d.filename()));
+    assert(subdirNames2.count(sanitizeFilename("测试水印-α")) == 1);
+    assert(subdirNames2.count(sanitizeFilename("测试水印-β")) == 1);
 
-    // Each subdirectory has exactly 2 files
+    // Each subdirectory has exactly 2 files (doc_A.pdf, doc_B.pdf)
     for (const auto& d : subdirs2) {
         std::vector<fs::path> entries;
         for (const auto& e : fs::directory_iterator(d)) {
@@ -224,11 +218,15 @@ void testMultiWatermarkBatch() {
             }
         }
         assert(entries.size() == 2);
+        std::unordered_set<std::string> pdfNames;
         for (const auto& pdf : entries) {
+            pdfNames.insert(pathToString(pdf.filename()));
             assert(fs::file_size(pdf) > 0);
             auto docRef = PdfDocument::open(pdf);
             assert(PdfDocument::pageCount(docRef.first.get()) == 1);
         }
+        assert(pdfNames.count("doc_A.pdf") == 1);
+        assert(pdfNames.count("doc_B.pdf") == 1);
     }
     // ── Advanced: Cancellation during multi-batch ──
     std::cout << "[RUN] testMultiWatermarkBatch (cancellation)\n";

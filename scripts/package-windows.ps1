@@ -122,37 +122,6 @@ foreach ($banned in @('vc_redist.x64.exe', 'vc_redist.x86.exe', 'vc_redist_arm64
     }
 }
 
-# 5c. Ship MSVC runtime DLLs flat next to PdfMark.exe so the user never has to
-#     install or restart anything.
-$runtimeDlls = @(
-    'msvcp140.dll',
-    'msvcp140_1.dll',
-    'msvcp140_2.dll',
-    'msvcp140_atomic_wait.dll',
-    'msvcp140_codecvt_ids.dll',
-    'vcruntime140.dll',
-    'vcruntime140_1.dll',
-    'vcruntime140_threading.dll',
-    'concrt140.dll',
-    'dbghelp.dll'
-)
-
-$crtSearchRoots = @('C:\Windows\System32')
-
-foreach ($dll in $runtimeDlls) {
-    $dllPath = $null
-    foreach ($root in $crtSearchRoots) {
-        $candidate = Join-Path $root $dll
-        if (Test-Path $candidate) {
-            $dllPath = $candidate
-            break
-        }
-    }
-    if ($dllPath) {
-        Copy-Item -Force $dllPath -Destination $packageDir
-    }
-}
-Write-Host "  embedded MSVC runtime DLLs flat next to PdfMark.exe (no installer, no reboot)" -ForegroundColor Green
 
 # 6. Copy License and Readme if present
 if (Test-Path "README.md") {

@@ -18,10 +18,12 @@ WatermarkRenderer::Stamp WatermarkRenderer::createStamp(const WatermarkConfig& c
     }
 
     int pixelSize = WatermarkTileLayout::calculatePixelFontSize(config.fontSizePt, config.dpi);
-    QFont font("Arial");
+    QString family = config.fontFamily.empty() ? QString("Arial") : QString::fromStdString(config.fontFamily);
+    QFont font(family);
     font.setPixelSize(pixelSize);
     font.setStyleHint(QFont::SansSerif);
-    font.setBold(true);
+    font.setBold(config.fontBold);
+    font.setItalic(config.fontItalic);
 
     stamp.font = font;
     stamp.rotationDeg = config.rotationDegrees;

@@ -164,19 +164,21 @@ void TaskManager::cancel() {
 fs::path TaskManager::outputPathFor(const fs::path& input,
                                    const std::string& watermarkText,
                                    int duplicateIndex) const {
-    std::string stem = sanitizeFilename(pathToString(input.stem()));
-    std::string cleanTag = watermarkText.empty() ? std::string("watermarked")
-                                                 : sanitizeFilename(watermarkText);
-    std::string filename = cleanTag;
+    // 子目录 = 水印文本的 sanitize 版本
+    std::string subdir = watermarkText.empty() ? std::string("watermark")
+                                               : sanitizeFilename(watermarkText);
+    // 文件名 = 源 PDF 的原文件名（stem+ext）
+    std::string filename = pathToString(input.filename());
     if (duplicateIndex > 0) {
-        filename += "_" + std::to_string(duplicateIndex);
+        // 添加序号以区分同名文件
+        std::string stem = pathToString(input.stem());
+        std::string ext = pathToString(input.extension());
+        filename = stem + "_" + std::to_string(duplicateIndex) + ext;
     }
-    filename += ".pdf";
-    std::string subdir = stem.empty() ? "output" : stem;
-
     if (!outputDir_.empty()) {
         return outputDir_ / stringToPath(subdir) / stringToPath(filename);
     }
+    // 否则放置在源 PDF 所在目录下
     return input.parent_path() / stringToPath(subdir) / stringToPath(filename);
 }
 

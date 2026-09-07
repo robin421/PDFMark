@@ -99,17 +99,25 @@ if(MSVC)
     add_compile_options(/EHa)
 endif()
 
+# Static CRT for Win7 SP1 compatibility — eliminates api-ms-win-crt dependency
+# that triggers "_std_terminate" crash on Win7 without KB2999226.
+# CMAKE_MSVC_RUNTIME_LIBRARY propagates to all targets (pdfmark_core, PdfMark, tests).
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 # --- Windows / MSVC performance flags (Release builds only) ---
 # CMake's MSVC default is already /O2; we additionally enable full-program
 # optimization (/GL), intrinsic inline expansion (/Oi), function-level linking
-# (/Gy) and AVX2 vectorization (/arch:AVX2) to accelerate image/color work.
+# (/Gy) and AVX vectorization (/arch:AVX) to accelerate image/color work.
+# NOTE: AVX (Sandy Bridge+, 2011) is the floor for Win7 compat — AVX2 would fault on 2011-2013 CPUs.
 # /GL at compile time pairs with /LTCG at link time (both only in Release to
 # avoid bloating Debug/incremental builds). NOTE: only pdfmark_core exists at
 # this point in the file; PdfMark and the test executables get their flags
 # immediately after their own definitions below.
 if(MSVC)
     target_compile_options(pdfmark_core PRIVATE
-        "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:/O2;/GL;/Oi;/Gy;/arch:AVX2>")
+        "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:/O2;/GL;/Oi;/Gy;/arch:AVX>")
 endif()
 
 target_include_directories(pdfmark_core PUBLIC
@@ -172,7 +180,7 @@ if(WIN32)
 endif()
 if(MSVC)
     target_compile_options(PdfMark PRIVATE
-        "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:/O2;/GL;/Oi;/Gy;/arch:AVX2>")
+        "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:/O2;/GL;/Oi;/Gy;/arch:AVX>")
     target_link_options(PdfMark PRIVATE "$<$<CONFIG:Release>:/LTCG;/OPT:REF;/OPT:ICF>")
 endif()
 
