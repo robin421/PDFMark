@@ -22,34 +22,24 @@ namespace {
 #ifdef _WIN32
 QFile* g_logFile = nullptr;
 
-// Returns true if Win7 is missing the platform update that adds CreateDXGIFactory2 to dxgi.dll.
-// Shows a user-friendly dialog and returns true so the caller exits before Qt is touched.
-// Returns false when on a capable system (Win8.1+, or patched Win7) so normal startup proceeds.
+// Returns true if the system is missing the platform update that adds
+// CreateDXGIFactory2 to dxgi.dll, shows a user-friendly dialog, and exits.
+// CreateDXGIFactory2 exists only on Win8.1+ or Win7 with KB2670838.
+// We probe dxgi.dll directly instead of checking the OS version so this works
+// with any compiler default (_WIN32_WINNT) and avoids VER_* macro dependency.
 bool checkWin7DXGI() {
-    OSVERSIONINFOEXW vi = {};
-    vi.dwOSVersionInfoSize = sizeof(vi);
-    vi.dwMajorVersion = 6;
-    vi.dwMinorVersion = 1; // Win 7 = 6.1
-    vi.wServicePackMajor = 1; // minimum SP1
-    DWORDLONG cond = 0;
-    VER_SET_CONDITION(cond, VER_MAJORVERSION, VER_EQUAL);
-    VER_SET_CONDITION(cond, VER_MINORVERSION, VER_EQUAL);
-    VER_SET_CONDITION(cond, VER_SERVICEPACKMAJOR, VER_GREATER_OR_EQUAL);
-    if (!VerifyVersionInfoW(&vi, VER_MAJORVERSION | VER_MINORVERSION | VER_SERVICEPACKMAJOR, cond))
-        return false; // not Win7 — let it run
-
-    // Win7 detected: check whether CreateDXGIFactory2 exists in dxgi.dll
     HMODULE hDxgi = LoadLibraryW(L"dxgi.dll");
-    if (!hDxgi) return false;
-    FARPROC sym = GetProcAddress(hDxgi, "CreateDXGIFactory2");
-    FreeLibrary(hDxgi);
-    if (sym) return false; // API present — nothing to do
+    if (hDxgi) {
+        FARPROC sym = GetProcAddress(hDxgi, "CreateDXGIFactory2");
+        FreeLibrary(hDxgi);
+        if (sym) return false; // API present — nothing to do
+    }
 
-    // Missing: show user-friendly explanation and exit
+    // Missing: this is Win7 without KB2670838 (or a broken dxgi). Explain and exit.
     const wchar_t* msg =
-        L"PDFMark 无法在您的 Windows 7 SP1 上启动。\n\n"
-        L"原因：系统缺少必需的更新组件。\n\n"
-        L"解决方法：安装以下补丁后重新启动，再双击 PdfMark.exe：\n\n"
+        L"PDFMark 无法在当前系统上启动。\n\n"
+        L"原因：系统缺少必需的更新组件（CreateDXGIFactory2）。\n\n"
+        L"解决方法：如果您在使用 Windows 7，请安装以下补丁后重新启动，再双击 PdfMark.exe：\n\n"
         L"  KB2670838（DirectX 11 软件光栅器更新）\n"
         L"  https://www.microsoft.com/zh-cn/download/details.aspx?id=36843\n\n"
         L"  如安装后仍报错，请同时安装：\n"
@@ -57,7 +47,7 @@ bool checkWin7DXGI() {
         L"  https://www.microsoft.com/zh-cn/download/details.aspx?id=49077\n\n"
         L"安装完成后重启电脑，再运行本程序。\n\n"
         L"技术支持：https://github.com/robin421/PDFMark/issues";
-    MessageBoxW(nullptr, msg, L"PDFMark — Windows 7 兼容性提示",
+    MessageBoxW(nullptr, msg, L"PDFMark — 兼容性提示",
                 MB_ICONINFORMATION | MB_OK | MB_TOPMOST);
     return true;
 }
