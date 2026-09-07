@@ -3,7 +3,6 @@
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](.github/workflows/windows-build.yml)
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://isocpp.org/std/the-standard)
 [![Qt 6](https://img.shields.io/badge/Qt-6.6-green.svg)](https://www.qt.io)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20x64-lightgrey)](#构建)
 
 > 将水印**彻底烧录**进 PDF 的每一页像素层——既抗 OCR 提取，又消除原始矢量/文本层隐患。
@@ -47,15 +46,15 @@ cmake -B build -G Ninja \
 cmake --build build -j
 ```
 
-### Windows
+### Windows 系统要求
 
-```powershell
-cmake -B build -G "Ninja" ^
-  -DCMAKE_BUILD_TYPE=Release ^
-  -DCMAKE_PREFIX_PATH="C:/Qt/6.6.3/msvc2019_64"
+- **推荐**：Windows 10/11 x64
+- **兼容**：Windows 7 SP1 x64（需预先安装以下两个微软补丁，否则程序会报错无法启动）
+  - [KB2670838](https://www.microsoft.com/zh-cn/download/details.aspx?id=36843)（DirectX 11 软件光栅器更新）— 提供 `CreateDXGIFactory2` 等 dxgi.dll 新增接口
+  - [KB2999226](https://www.microsoft.com/zh-cn/download/details.aspx?id=49077)（Universal C Runtime）
+  - 安装后**必须重启电脑**，再运行 `PdfMark.exe`
 
-cmake --build build --config Release
-```
+### Windows 构建（需 Windows 10 SDK）
 
 ### 运行测试
 

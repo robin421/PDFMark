@@ -9,7 +9,6 @@
 #endif
 #include "diagnostics/CrashReporter.h"
 
-
 #include <QDebug>
 #include <QFile>
 #include <QDir>
@@ -22,6 +21,46 @@
 namespace {
 #ifdef _WIN32
 QFile* g_logFile = nullptr;
+
+// Returns true if Win7 is missing the platform update that adds CreateDXGIFactory2 to dxgi.dll.
+// Shows a user-friendly dialog and returns true so the caller exits before Qt is touched.
+// Returns false when on a capable system (Win8.1+, or patched Win7) so normal startup proceeds.
+bool checkWin7DXGI() {
+    OSVERSIONINFOEXW vi = {};
+    vi.dwOSVersionInfoSize = sizeof(vi);
+    vi.dwMajorVersion = 6;
+    vi.dwMinorVersion = 1; // Win 7 = 6.1
+    vi.wServicePackMajor = 1; // minimum SP1
+    DWORDLONG cond = 0;
+    VER_SET_CONDITION(cond, VER_MAJORVERSION, VER_EQUAL);
+    VER_SET_CONDITION(cond, VER_MINORVERSION, VER_EQUAL);
+    VER_SET_CONDITION(cond, VER_SERVICEPACKMAJOR, VER_GREATER_OR_EQUAL);
+    if (!VerifyVersionInfoW(&vi, VER_MAJORVERSION | VER_MINORVERSION | VER_SERVICEPACKMAJOR, cond))
+        return false; // not Win7 — let it run
+
+    // Win7 detected: check whether CreateDXGIFactory2 exists in dxgi.dll
+    HMODULE hDxgi = LoadLibraryW(L"dxgi.dll");
+    if (!hDxgi) return false;
+    FARPROC sym = GetProcAddress(hDxgi, "CreateDXGIFactory2");
+    FreeLibrary(hDxgi);
+    if (sym) return false; // API present — nothing to do
+
+    // Missing: show user-friendly explanation and exit
+    const wchar_t* msg =
+        L"PDFMark 无法在您的 Windows 7 SP1 上启动。\n\n"
+        L"原因：系统缺少必需的更新组件。\n\n"
+        L"解决方法：安装以下补丁后重新启动，再双击 PdfMark.exe：\n\n"
+        L"  KB2670838（DirectX 11 软件光栅器更新）\n"
+        L"  https://www.microsoft.com/zh-cn/download/details.aspx?id=36843\n\n"
+        L"  如安装后仍报错，请同时安装：\n"
+        L"  KB2999226（Universal C Runtime）\n"
+        L"  https://www.microsoft.com/zh-cn/download/details.aspx?id=49077\n\n"
+        L"安装完成后重启电脑，再运行本程序。\n\n"
+        L"技术支持：https://github.com/robin421/PDFMark/issues";
+    MessageBoxW(nullptr, msg, L"PDFMark — Windows 7 兼容性提示",
+                MB_ICONINFORMATION | MB_OK | MB_TOPMOST);
+    return true;
+}
 
 void messageHandler(QtMsgType type, const QMessageLogContext& context, const QString& msg) {
     if (!g_logFile) {
@@ -50,7 +89,6 @@ void messageHandler(QtMsgType type, const QMessageLogContext& context, const QSt
 }
 
 long WINAPI unhandledExceptionFilter(EXCEPTION_POINTERS* pExc) {
-    // Create crash dump in Documents folder
     QString dumpPath = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation) + "/PDFMark_crash.dmp";
     HANDLE hFile = CreateFileA(dumpPath.toUtf8().constData(),
         GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -113,7 +151,6 @@ long WINAPI unhandledExceptionFilter(EXCEPTION_POINTERS* pExc) {
     return EXCEPTION_EXECUTE_HANDLER;
 }
 #else
-// Non-Windows: just keep a simple log handler if needed
 void messageHandler(QtMsgType type, const QMessageLogContext& context, const QString& msg) {
     QByteArray localMsg = msg.toLocal8Bit();
     const char* file = context.file ? context.file : "";
@@ -127,11 +164,16 @@ void messageHandler(QtMsgType type, const QMessageLogContext& context, const QSt
     }
 }
 #endif
-} // namespace
+} // anonymous namespace
 
 int main(int argc, char *argv[]) {
 #ifdef _WIN32
-    // Install crash handler and logging for Windows
+    // Win7 pre-check: if unpatched, show dialog and exit before any DLL loads.
+    // This must run before SetUnhandledExceptionFilter/qInstallMessageHandler
+    // to avoid touching Qt / dxgi in an unpatched Win7 environment.
+    if (checkWin7DXGI())
+        return 1;
+
     SetUnhandledExceptionFilter(unhandledExceptionFilter);
     qInstallMessageHandler(messageHandler);
 #else
@@ -146,12 +188,10 @@ int main(int argc, char *argv[]) {
         QApplication::setApplicationDisplayName("PDFMark");
         QApplication::setOrganizationName("PDFMark");
 
-        // Register meta types for cross-thread signal/slot
         qRegisterMetaType<pdfmark::FileResult>("pdfmark::FileResult");
         qRegisterMetaType<std::vector<pdfmark::FileResult>>("std::vector<pdfmark::FileResult>");
 
         pdfmark::MainWindow window;
-        // Asynchronously check and report any pending crash from previous crash
         pdfmark::CrashReporter::checkAndReportPendingCrashes();
 
         window.show();
