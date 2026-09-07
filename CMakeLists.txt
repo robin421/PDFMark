@@ -7,6 +7,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 if(WIN32)
     add_compile_definitions(NOMINMAX)
 endif()
+if(MSVC)
+    # Static CRT for Win7 SP1 compatibility — eliminates api-ms-win-crt dependency
+    # that triggers "_std_terminate" crash on Win7 without KB2999226.
+    # MUST be set before any add_library: CMake bakes MSVC_RUNTIME_LIBRARY into
+    # each target at creation time, so a later set() only affects new targets.
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
 
 # Enable Qt Automoc / Autouic / Autorcc
 set(CMAKE_AUTOMOC ON)
@@ -99,12 +106,6 @@ if(MSVC)
     add_compile_options(/EHa)
 endif()
 
-# Static CRT for Win7 SP1 compatibility — eliminates api-ms-win-crt dependency
-# that triggers "_std_terminate" crash on Win7 without KB2999226.
-# CMAKE_MSVC_RUNTIME_LIBRARY propagates to all targets (pdfmark_core, PdfMark, tests).
-if(MSVC)
-    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-endif()
 
 # --- Windows / MSVC performance flags (Release builds only) ---
 # CMake's MSVC default is already /O2; we additionally enable full-program
