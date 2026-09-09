@@ -17,7 +17,7 @@ target_link_libraries(pdfmark_tests PRIVATE
 )
 if(MSVC)
     target_compile_options(pdfmark_tests PRIVATE
-        "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:/O2;/GL;/Oi;/Gy;/arch:AVX2>")
+        "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:/O2;/GL;/Oi;/Gy>")
     target_link_options(pdfmark_tests PRIVATE "$<$<CONFIG:Release>:/LTCG;/OPT:REF;/OPT:ICF>")
 endif()
 
@@ -64,7 +64,7 @@ target_link_libraries(pdfmark_updater_test PRIVATE
 )
 if(MSVC)
     target_compile_options(pdfmark_updater_test PRIVATE
-        "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:/O2;/GL;/Oi;/Gy;/arch:AVX2>")
+        "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:/O2;/GL;/Oi;/Gy>")
     target_link_options(pdfmark_updater_test PRIVATE "$<$<CONFIG:Release>:/LTCG;/OPT:REF;/OPT:ICF>")
 endif()
 add_test(NAME AutoUpdaterTest COMMAND pdfmark_updater_test)

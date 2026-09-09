@@ -6,6 +6,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <dbghelp.h>
+#include <intrin.h>  // __cpuid for CPU feature detection
 #endif
 #include "diagnostics/CrashReporter.h"
 
@@ -49,6 +50,30 @@ bool checkWin7DXGI() {
         L"技术支持：https://github.com/robin421/PDFMark/issues";
     MessageBoxW(nullptr, msg, L"PDFMark — 兼容性提示",
                 MB_ICONINFORMATION | MB_OK | MB_TOPMOST);
+    return true;
+}
+
+// Returns true (and shows a dialog) if the CPU lacks SSSE3, which is required
+// by the pdfium prebuilt binary.  Without SSSE3, pdfium.dll will crash with
+// EXCEPTION_ILLEGAL_INSTRUCTION (0xC000001D) during DLL initialization.
+bool checkCpuFeatures() {
+    // CPUID leaf 1, ECX bit 9 = SSSE3
+    int cpuInfo[4] = {0};
+    __cpuid(cpuInfo, 1);
+    bool hasSSSE3 = (cpuInfo[2] & (1 << 9)) != 0;
+    if (hasSSSE3) return false; // OK
+
+    const wchar_t* msg =
+        L"PDFMark 无法在当前 CPU 上运行。\n\n"
+        L"原因：您的 CPU 不支持 SSSE3 指令集，而 PDFMark 依赖的 PDF 渲染引擎 (pdfium) 需要该指令集。\n\n"
+        L"这通常发生在以下 CPU 上：\n"
+        L"  • 较老的 AMD Athlon 64 / Sempron / Phenom I 系列\n"
+        L"  • 早期 Intel Atom (Bonnell 架构)\n"
+        L"  • 2006 年以前的 Intel Core 处理器\n\n"
+        L"解决方法：请在支持 SSSE3 的较新计算机上运行本程序。\n\n"
+        L"技术支持：https://github.com/robin421/PDFMark/issues";
+    MessageBoxW(nullptr, msg, L"PDFMark — CPU 兼容性检查",
+                MB_ICONERROR | MB_OK | MB_TOPMOST);
     return true;
 }
 
@@ -162,6 +187,12 @@ int main(int argc, char *argv[]) {
     // This must run before SetUnhandledExceptionFilter/qInstallMessageHandler
     // to avoid touching Qt / dxgi in an unpatched Win7 environment.
     if (checkWin7DXGI())
+        return 1;
+
+    // CPU feature pre-check: pdfium requires SSSE3.  On CPUs without it,
+    // pdfium.dll crashes with EXCEPTION_ILLEGAL_INSTRUCTION (0xC000001D)
+    // during DLL init.  Catch this before any pdfium code runs.
+    if (checkCpuFeatures())
         return 1;
 
     SetUnhandledExceptionFilter(unhandledExceptionFilter);

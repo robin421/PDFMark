@@ -100,25 +100,70 @@ if ($pdfiumPath) {
 }
 
 # 5. Run windeployqt
-#     Pass --no-compiler-runtime so windeployqt does NOT drop the giant
-#     vc_redist.x64.exe installer into the package.  That installer prompted
-#     users to restart Windows after "installing" PDFMark.  PDFMark is meant to
-#     be a portable, no-install application.
+#     We intentionally do NOT pass --no-compiler-runtime any more: Qt's own DLLs
+#     (Qt6Core.dll etc.) and pdfium.dll are dynamically linked against the
+#     MSVC C/C++ runtime (VCRUNTIME140.dll, VCRUNTIME140_1.dll, msvcp140.dll,
+#     msvcp140_1.dll, msvcp140_2.dll).  Without these DLLs in the package,
+#     users who don't have the VC++ Redistributable installed will see:
+#       "由于找不到 VCRUNTIME140_1.dll，无法继续执行代码"
+#     We still clean up vc_redist*.exe installers afterwards so the package
+#     stays portable (no installer prompts / restarts).
 Write-Host "[4/5] Deploying Qt dependencies..." -ForegroundColor Yellow
 $deployTarget = Join-Path $packageDir "PdfMark.exe"
-& $windeployqt --release --no-translations --no-compiler-runtime --no-opengl-sw $deployTarget
+& $windeployqt --release --no-translations --no-opengl-sw $deployTarget
 
 if ($LASTEXITCODE -ne 0) {
     Write-Error "windeployqt failed with exit code $LASTEXITCODE"
     exit $LASTEXITCODE
 }
 
-# 5b. Remove any installer that windeployqt may have left behind.
+# 5b. Remove any vc_redist installer EXE that windeployqt may have left behind.
+#     We want the individual runtime DLLs (VCRUNTIME140*.dll, msvcp140*.dll),
+#     NOT the bulky installer that prompts the user for "install" + reboot.
 foreach ($banned in @('vc_redist.x64.exe', 'vc_redist.x86.exe', 'vc_redist_arm64.exe')) {
     $bannedPath = Join-Path $packageDir $banned
     if (Test-Path $bannedPath) {
         Remove-Item -Force $bannedPath
         Write-Host "  removed installer-style runtime: $banned" -ForegroundColor DarkYellow
+    }
+}
+
+# 5c. Ensure critical VC runtime DLLs are present.  If windeployqt didn't copy
+#     them (older Qt versions), locate them from the MSVC toolchain and copy.
+$requiredRuntimeDlls = @(
+    'vcruntime140.dll',
+    'vcruntime140_1.dll',
+    'msvcp140.dll',
+    'msvcp140_1.dll',
+    'msvcp140_2.dll'
+)
+
+foreach ($dllName in $requiredRuntimeDlls) {
+    $destPath = Join-Path $packageDir $dllName
+    if (-not (Test-Path $destPath)) {
+        # Try to find the DLL from the Visual Studio redist directory
+        $vcToolsRedist = $env:VCToolsRedistDir
+        if ($vcToolsRedist) {
+            $candidates = @(
+                (Join-Path $vcToolsRedist "x64\Microsoft.VC143.CRT\$dllName"),
+                (Join-Path $vcToolsRedist "x64\Microsoft.VC142.CRT\$dllName")
+            )
+            foreach ($src in $candidates) {
+                if (Test-Path $src) {
+                    Copy-Item $src -Destination $packageDir
+                    Write-Host "  copied missing runtime: $dllName" -ForegroundColor DarkYellow
+                    break
+                }
+            }
+        }
+        # Fallback: search PATH
+        if (-not (Test-Path $destPath)) {
+            $found = Get-Command $dllName -ErrorAction SilentlyContinue
+            if ($found) {
+                Copy-Item $found.Source -Destination $packageDir
+                Write-Host "  copied missing runtime from PATH: $dllName" -ForegroundColor DarkYellow
+            }
+        }
     }
 }
 

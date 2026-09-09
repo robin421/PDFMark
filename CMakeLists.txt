@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(PDFMark VERSION 1.1.3 LANGUAGES CXX C)
+project(PDFMark VERSION 1.1.7 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -109,16 +109,19 @@ endif()
 
 # --- Windows / MSVC performance flags (Release builds only) ---
 # CMake's MSVC default is already /O2; we additionally enable full-program
-# optimization (/GL), intrinsic inline expansion (/Oi), function-level linking
-# (/Gy) and AVX vectorization (/arch:AVX) to accelerate image/color work.
-# NOTE: AVX (Sandy Bridge+, 2011) is the floor for Win7 compat — AVX2 would fault on 2011-2013 CPUs.
+# optimization (/GL), intrinsic inline expansion (/Oi), and function-level
+# linking (/Gy) to accelerate the build.
+# NOTE: /arch:AVX was removed because it caused EXCEPTION_ILLEGAL_INSTRUCTION
+# (0xC000001D) crashes on user machines whose CPUs lack AVX support.  The x64
+# baseline (SSE2) is used implicitly.  The pdfium prebuilt binary ships with
+# its own SIMD level which we cannot control from here.
 # /GL at compile time pairs with /LTCG at link time (both only in Release to
 # avoid bloating Debug/incremental builds). NOTE: only pdfmark_core exists at
 # this point in the file; PdfMark and the test executables get their flags
 # immediately after their own definitions below.
 if(MSVC)
     target_compile_options(pdfmark_core PRIVATE
-        "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:/O2;/GL;/Oi;/Gy;/arch:AVX>")
+        "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:/O2;/GL;/Oi;/Gy>")
 endif()
 
 target_include_directories(pdfmark_core PUBLIC
@@ -181,7 +184,7 @@ if(WIN32)
 endif()
 if(MSVC)
     target_compile_options(PdfMark PRIVATE
-        "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:/O2;/GL;/Oi;/Gy;/arch:AVX>")
+        "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:/O2;/GL;/Oi;/Gy>")
     target_link_options(PdfMark PRIVATE "$<$<CONFIG:Release>:/LTCG;/OPT:REF;/OPT:ICF>")
 endif()
 
