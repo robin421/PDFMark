@@ -164,6 +164,52 @@ void testWatermarkTemplate() {
         assert(store.templates().empty());
     }
 
+    // ── template name derived from the watermark text (no user input) ─────
+    {
+        std::vector<WatermarkConfig> one;
+        WatermarkConfig a;
+        a.text = "ABCV";
+        one.assign(1, a);
+        assert(templateNameFromConfigs(one) == "ABCV");
+
+        a.text = "机密";
+        one.assign(1, a);
+        assert(templateNameFromConfigs(one) == "机密");
+
+        a.text = "一二三四五六";          // exactly 6 -> unchanged
+        one.assign(1, a);
+        assert(templateNameFromConfigs(one) == "一二三四五六");
+
+        a.text = "机密文件请勿外传";      // 8 chars -> first 6 + "..."
+        one.assign(1, a);
+        assert(templateNameFromConfigs(one) == "机密文件请勿...");
+
+        a.text = "ABCDEFGH";              // 8 ASCII -> first 6 + "..."
+        one.assign(1, a);
+        assert(templateNameFromConfigs(one) == "ABCDEF...");
+
+        a.text = "  机密  ";              // trimmed
+        one.assign(1, a);
+        assert(templateNameFromConfigs(one) == "机密");
+
+        // first non-empty line wins; blank-only input yields no name
+        std::vector<WatermarkConfig> many;
+        WatermarkConfig blank;
+        blank.text = "";
+        many.push_back(blank);
+        WatermarkConfig real;
+        real.text = "内部资料";
+        many.push_back(real);
+        assert(templateNameFromConfigs(many) == "内部资料");
+
+        std::vector<WatermarkConfig> spaces;
+        WatermarkConfig onlySpace;
+        onlySpace.text = "   ";
+        spaces.push_back(onlySpace);
+        assert(templateNameFromConfigs(spaces).empty());
+        assert(templateNameFromConfigs({}).empty());
+    }
+
     fs::remove_all(dir, ec);
     std::cout << "[PASS] testWatermarkTemplate\n";
 }

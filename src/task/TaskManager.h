@@ -3,6 +3,7 @@
 
 #include "common/Common.h"
 #include "watermark/WatermarkConfig.h"
+#include "task/WorkloadEstimate.h"
 #include <QObject>
 #include <QString>
 #include <QThread>
@@ -33,7 +34,13 @@ public:
     void setWatermarkConfig(const WatermarkConfig& config);
     void setWatermarkConfigs(const std::vector<WatermarkConfig>& configs);
     void setSubtasks(const std::vector<FileSubtask>& subtasks);
+    // Legacy shim kept for tests / older callers. The UI no longer sets a
+    // performance mode; it passes a fully derived ConcurrencyPolicy instead.
     void setPerformanceMode(PerformanceMode mode);
+
+    // Fully automatic concurrency: window, thread count, throttle and the RAM
+    // budget used for runtime adaptation. See planConcurrency().
+    void setConcurrencyPolicy(const ConcurrencyPolicy& policy);
 
     // Hard cap on how many source documents are processed concurrently.
     // 0 (default) => whatever the performance mode allows. The UI derives this
@@ -71,6 +78,9 @@ public:
     int effectiveConcurrency() const { return effectiveConcurrency_.load(); }
     int peakConcurrentDocuments() const { return peakInFlightDocs_.load(); }
     int throttleMs() const { return throttleMs_.load(); }
+    // Live window, which may shrink/grow while running to respect the RAM budget.
+    int currentWindow() const { return currentWindow_.load(); }
+    long long observedRss() const { return observedRss_.load(); }
 
 signals:
     void fileStarted(const QString& fileName, int index, int total);
@@ -81,6 +91,8 @@ signals:
     void errorOccurred(const QString& message);
     void cancelled();
     void passwordRequired(const QString& filePath);
+    // Emitted when the adaptive window changes mid-run (e.g. 2 -> 1).
+    void concurrencyChanged(int window);
 
 private:
     struct FileTaskItem {
@@ -129,7 +141,12 @@ private:
     std::atomic<bool> shuttingDown_{false};
 
     std::atomic<int> maxConcurrentDocs_{0};
+    std::atomic<int> poolThreads_{0};
     std::atomic<int> throttleMs_{0};
+    std::atomic<int64_t> ramBudgetBytes_{0};
+    std::atomic<int> maxWindow_{1};
+    std::atomic<int> currentWindow_{1};
+    std::atomic<long long> observedRss_{0};
     std::atomic<int> effectiveConcurrency_{0};
     std::atomic<int> inFlightDocs_{0};
     std::atomic<int> peakInFlightDocs_{0};

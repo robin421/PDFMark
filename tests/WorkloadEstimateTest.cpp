@@ -133,6 +133,72 @@ void testWorkloadEstimate() {
         assert(a4_300 > a4_200);   // higher DPI => larger raster
     }
 
+    // ── automatic concurrency policy ──────────────────────────────────────
+    {
+        // CPU-only ceiling: PDFium serialises rasterisation, so never more
+        // than 4 workers even on a 64-core machine.
+        assert(cpuBasedConcurrency(0) == 2);
+        assert(cpuBasedConcurrency(2) == 2);
+        assert(cpuBasedConcurrency(4) == 2);
+        assert(cpuBasedConcurrency(8) == 4);
+        assert(cpuBasedConcurrency(64) == 4);
+    }
+    {
+        // Empty batch: exactly one document, no throttle.
+        WorkloadInput in;
+        in.totalRamBytes = 8 * kGb;
+        in.cpuCap = 4;
+        ConcurrencyPolicy p = planConcurrency(estimateWorkload(in), 8);
+        assert(p.maxConcurrentDocs == 1);
+        assert(p.poolThreads == 1);
+        assert(p.throttleMs == 0);
+    }
+    {
+        // Roomy machine + small files => CPU-capped, and the pool gets exactly
+        // as many threads as the window (more would only hold extra documents).
+        WorkloadInput in;
+        for (int i = 0; i < 3; ++i) in.files.push_back(doc(10, 1, 1 * kMb));
+        in.totalRamBytes = 32 * kGb;
+        in.currentRssBytes = 100 * kMb;
+        in.cpuCap = 4;
+
+        WorkloadEstimate e = estimateWorkload(in);
+        ConcurrencyPolicy p = planConcurrency(e, 8);
+        assert(p.maxConcurrentDocs == 4);
+        assert(p.poolThreads == p.maxConcurrentDocs);
+        assert(p.throttleMs == 0);
+        assert(p.ramBudgetBytes == e.usableRamBytes);
+        assert(e.maxDocSourceBytes == 1 * kMb);
+    }
+    {
+        // Huge scanned PDF on a modest machine => RAM forces 1, well below the
+        // CPU-based ceiling.
+        WorkloadInput in;
+        in.files.push_back(doc(800, 3, 300 * kMb));
+        in.totalRamBytes = 4 * kGb;
+        in.currentRssBytes = 200 * kMb;
+        in.cpuCap = 4;
+
+        WorkloadEstimate e = estimateWorkload(in);
+        ConcurrencyPolicy p = planConcurrency(e, 16);
+        assert(p.maxConcurrentDocs == 1);
+        assert(p.maxConcurrentDocs <= cpuBasedConcurrency(16));
+        assert(p.throttleMs == 0);   // 1 file, so nothing to pace
+    }
+    {
+        // Large queue => a small pause between submissions, and the window is
+        // never widened by having many files.
+        WorkloadInput in;
+        for (int i = 0; i < 40; ++i) in.files.push_back(doc(5, 1, 1 * kMb));
+        in.totalRamBytes = 8 * kGb;
+        in.cpuCap = 4;
+
+        WorkloadEstimate e = estimateWorkload(in);
+        ConcurrencyPolicy p = planConcurrency(e, 4);
+        assert(p.maxConcurrentDocs >= 1 && p.maxConcurrentDocs <= 2);
+        assert(p.throttleMs == kAutoThrottleMs);
+    }
+
     std::cout << "[PASS] testWorkloadEstimate\n";
 }
 

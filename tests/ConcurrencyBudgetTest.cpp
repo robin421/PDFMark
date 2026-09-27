@@ -167,6 +167,46 @@ void testConcurrencyBudget() {
                   << " success=" << stress.successCount << "\n";
     }
 
+    // ── ConcurrencyPolicy drives the window; the runtime budget shrinks it ──
+    {
+        WatermarkConfig cfg;
+        cfg.text = "ADAPTIVE";
+        cfg.dpi = 72;
+
+        std::vector<TaskManager::FileSubtask> subtasks;
+        subtasks.reserve(inputs.size());
+        for (const auto& p : inputs) subtasks.push_back({p, cfg});
+
+        TaskManager tm;
+        tm.setSubtasks(subtasks);
+        tm.setOutputDirectory(workDir / "out_adaptive");
+
+        ConcurrencyPolicy policy;
+        policy.maxConcurrentDocs = 4;
+        policy.poolThreads = 4;
+        policy.throttleMs = 0;
+        policy.ramBudgetBytes = 1;   // absurdly small => must converge to 1
+        tm.setConcurrencyPolicy(policy);
+
+        bool finished = false;
+        QEventLoop loop;
+        QObject::connect(&tm, &TaskManager::allFinished, &loop,
+                         [&](const std::vector<FileResult>&) { finished = true; loop.quit(); });
+        QTimer::singleShot(60000, &loop, [&]() { loop.quit(); });
+
+        tm.start();
+        loop.exec();
+
+        assert(finished && "adaptive run never finished");
+        // The adaptive back-off must have driven the window down to the floor...
+        assert(tm.currentWindow() == 1);
+        // ...while never exceeding the requested ceiling on the way down.
+        assert(tm.peakConcurrentDocuments() <= policy.maxConcurrentDocs);
+        assert(tm.observedRss() > 0);
+        std::cout << "  adaptive run: window " << tm.effectiveConcurrency() << " -> "
+                  << tm.currentWindow() << ", peak=" << tm.peakConcurrentDocuments() << "\n";
+    }
+
     // Peak RSS must not scale with the batch: the window bounds live memory.
     const long long rssAfter = MemoryProbe::currentPhysicalBytes();
     assert(rssAfter > 0);

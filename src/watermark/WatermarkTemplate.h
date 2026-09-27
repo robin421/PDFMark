@@ -32,6 +32,40 @@ struct WatermarkTemplate {
     }
 };
 
+// Template names are derived from the watermark text instead of being typed by
+// the user: the first non-empty line, truncated to 6 characters with "...".
+// Chinese characters count as one unit, so counting walks UTF-8 code points.
+inline constexpr int kMaxTemplateNameChars = 6;
+
+inline std::string templateNameFromConfigs(const std::vector<WatermarkConfig>& configs) {
+    std::string text;
+    for (const auto& cfg : configs) {
+        if (cfg.text.empty()) continue;
+        const size_t b = cfg.text.find_first_not_of(" \t\r\n");
+        if (b == std::string::npos) continue;
+        const size_t e = cfg.text.find_last_not_of(" \t\r\n");
+        text = cfg.text.substr(b, e - b + 1);
+        if (!text.empty()) break;
+    }
+    if (text.empty()) return std::string();
+
+    size_t chars = 0;
+    size_t cut = text.size();
+    for (size_t i = 0; i < text.size();) {
+        const unsigned char c = static_cast<unsigned char>(text[i]);
+        size_t len = (c < 0x80) ? 1u : (c >= 0xF0 ? 4u : (c >= 0xE0 ? 3u : 2u));
+        if (i + len > text.size()) len = 1;
+        if (chars == static_cast<size_t>(kMaxTemplateNameChars)) {
+            cut = i;
+            break;
+        }
+        ++chars;
+        i += len;
+    }
+    if (cut < text.size()) return text.substr(0, cut) + "...";
+    return text;
+}
+
 // Expand a template into the per-file config list used by the batch pipeline.
 // Entries with empty text are dropped so a template never produces a blank
 // watermark.

@@ -50,6 +50,7 @@ WorkloadEstimate estimateWorkload(const WorkloadInput& in) {
     // Worst-case concurrent document: source bytes + base page image + one
     // working copy (transient, per additional watermark) + the full output
     // document buffered in memory until save().
+    e.maxDocSourceBytes = maxDocSource;
     e.perDocPeakBytes = maxDocSource
                       + 2 * e.pageImageBytes
                       + maxDocPageUnits * kOutputBytesPerPage;
@@ -84,6 +85,26 @@ WorkloadEstimate estimateWorkload(const WorkloadInput& in) {
         e.risk = WorkloadRisk::Risky;
     }
     return e;
+}
+
+ConcurrencyPolicy planConcurrency(const WorkloadEstimate& est, int logicalCores) {
+    ConcurrencyPolicy policy;
+    const int cpuCap = cpuBasedConcurrency(logicalCores);
+
+    int docs = est.recommendedConcurrentDocs;
+    if (docs < 1) docs = 1;
+    if (docs > cpuCap) docs = cpuCap;
+
+    policy.maxConcurrentDocs = docs;
+    // The window is the binding constraint, so the pool needs exactly that many
+    // threads; anything more would just hold extra documents in RAM.
+    policy.poolThreads = docs;
+    policy.ramBudgetBytes = est.usableRamBytes;
+
+    // Very large queues get a small pause between submissions so the machine
+    // (and the UI) stays responsive while working through them.
+    policy.throttleMs = est.fileCount > 4 * docs ? kAutoThrottleMs : 0;
+    return policy;
 }
 
 bool needsPreflightWarning(const WorkloadEstimate& e) {

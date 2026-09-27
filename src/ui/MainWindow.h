@@ -73,8 +73,13 @@ protected:
     void onClearFiles();
     void onRemoveSelectedFile();
     void onSelectOutputDir();
+    // Which PDFs a batch covers: the checked ones, or every file in the list.
+    enum class BatchScope { Checked, All };
+
     void onStartAllClicked();
-    void onStartSelectedClicked();
+    void onStartCheckedClicked();
+    void onSelectAllFiles();
+    void onSelectNoFiles();
     void onCancelClicked();
     void onOpenOutputFolder();
     void onFileSelectionChanged();
@@ -127,14 +132,14 @@ private:
     void saveCurrentWatermarks();
     void loadWatermarksForSelectedFile();
 
-    std::vector<TaskManager::FileSubtask> buildAllConfigs(bool onlySelected = false);
-    void runBatch(bool onlySelected);
+    std::vector<TaskManager::FileSubtask> buildAllConfigs(BatchScope scope);
+    void runBatch(BatchScope scope);
 
     // Single confirmation gate before a batch starts: shows what will be
     // produced (files, outputs, output directory) and, for large/memory-tight
     // batches, the memory recommendation. Returns false when the user cancels.
     bool confirmBatchRun(const std::vector<TaskManager::FileSubtask>& subtasks,
-                         bool onlySelected);
+                         BatchScope scope);
 
     // Dynamic button copy: "生成当前 PDF（3 条）" etc. depends on mode + config.
     void refreshActionLabels();
@@ -146,9 +151,27 @@ private:
     // (keeps them O(1) instead of scanning the whole table per signal).
     void rebuildFileIndex();
 
+    // ── File list access ─────────────────────────────────────────────────
+    // The table only *displays* a checkbox and a file name; the path, page
+    // count and status live in hidden data roles on the name item so changing
+    // the visible columns can never break the logic again.
+    void appendFileRow(const QString& filePath);
+    QString pathAt(int row) const;
+    void setPathAt(int row, const QString& path);
+    int pagesAt(int row) const;
+    void setPagesAt(int row, int pages);
+    QString statusAt(int row) const;
+    void setStatus(int row, const QString& status, const QString& tooltip = QString());
+    bool isCheckedAt(int row) const;
+    void setCheckedAt(int row, bool on);
+    std::vector<QString> checkedPaths() const;
+    int checkedCount() const;
+
     // True when the right panel is in "template mode" (global, all PDFs share
     // one template) instead of "custom mode" (edit the current PDF only).
     bool isTemplateMode() const;
+    // True when the visible watermark rows contain at least one non-empty text.
+    bool hasAnyWatermarkRow() const;
 
     // Widgets
     QTableWidget* fileTable_ = nullptr;
@@ -180,7 +203,6 @@ private:
     QLabel* depthValueLabel_ = nullptr;
     QSpinBox* depthSpin_ = nullptr;
     QPushButton* previewBtn_ = nullptr;
-    QComboBox* perfCombo_ = nullptr;
     QLineEdit* outputDirEdit_ = nullptr;
     // New font/rotation controls
     QDoubleSpinBox* rotationSpin_ = nullptr;
@@ -191,7 +213,9 @@ private:
     QDialog* previewDialog_ = nullptr;
     QLabel* statusLabel_ = nullptr;
     QPushButton* startAllBtn_ = nullptr;
-    QPushButton* startSelectedBtn_ = nullptr;
+    QPushButton* startCheckedBtn_ = nullptr;
+    QPushButton* selectAllBtn_ = nullptr;
+    QPushButton* selectNoneBtn_ = nullptr;
     QPushButton* cancelBtn_ = nullptr;
 
     TaskManager taskManager_;

@@ -47,6 +47,7 @@ TaskManager::TaskManager(QObject* parent)
     pool_->setMaxThreadCount(WorkerPool::idealWorkerCount(PerformanceMode::Normal));
     qRegisterMetaType<FileResult>("FileResult");
     qRegisterMetaType<std::vector<FileResult>>("std::vector<FileResult>");
+    qRegisterMetaType<int>("int");
 }
 
 TaskManager::~TaskManager() {
@@ -79,6 +80,13 @@ void TaskManager::setPerformanceMode(PerformanceMode mode) {
     std::lock_guard<std::mutex> lock(mutex_);
     perfMode_ = mode;
     pool_->setMaxThreadCount(WorkerPool::idealWorkerCount(mode));
+}
+
+void TaskManager::setConcurrencyPolicy(const ConcurrencyPolicy& policy) {
+    maxConcurrentDocs_.store(policy.maxConcurrentDocs > 0 ? policy.maxConcurrentDocs : 1);
+    poolThreads_.store(policy.poolThreads > 0 ? policy.poolThreads : 1);
+    throttleMs_.store(policy.throttleMs > 0 ? policy.throttleMs : 0);
+    ramBudgetBytes_.store(policy.ramBudgetBytes > 0 ? policy.ramBudgetBytes : 0);
 }
 
 void TaskManager::setMaxConcurrentDocuments(int count) {
@@ -501,18 +509,25 @@ void TaskManager::start() {
     auto completedUnits = std::make_shared<std::atomic<int>>(0);
     auto lastReportedPct = std::make_shared<std::atomic<int>>(0);
 
-    const int maxWorkers = WorkerPool::idealWorkerCount(perfMode_);
+    // Thread count comes from the ConcurrencyPolicy when the UI set one; the
+    // performance mode is only a fallback for legacy callers.
+    int maxWorkers = poolThreads_.load();
+    if (maxWorkers <= 0) maxWorkers = WorkerPool::idealWorkerCount(perfMode_);
+    maxWorkers = (std::max)(1, maxWorkers);
     pool_->setMaxThreadCount(maxWorkers);
 
     // Bounded sliding window: never keep more than `window` source documents in
     // flight. Peak memory therefore depends on `window`, not on how many files
-    // the user queued. `window` is derived from the RAM budget by the UI.
+    // are queued. Runtime adaptation may shrink it further (never below 1).
     const int requested = maxConcurrentDocs_.load();
     int window = requested > 0 ? requested : maxWorkers;
-    window = std::clamp(window, 1, (std::max)(1, maxWorkers));
+    window = std::clamp(window, 1, maxWorkers);
     effectiveConcurrency_.store(window);
+    maxWindow_.store(window);
+    currentWindow_.store(window);
     inFlightDocs_.store(0);
     peakInFlightDocs_.store(0);
+    observedRss_.store(0);
 
     const int throttle = throttleMs_.load();
     const size_t jobCount = docJobs.size();
@@ -530,11 +545,34 @@ void TaskManager::start() {
                 // Dispatch loop: submit one document at a time, but never let
                 // more than `window` run concurrently. When a document
                 // finishes it signals the condition variable and we top up.
+                int adaptiveThrottle = 0;
                 while (next < jobCount) {
                     sync->cv.wait(lk, [&]() {
-                        return sync->inFlight < window || cancelRequested_.load();
+                        return sync->inFlight < currentWindow_.load() || cancelRequested_.load();
                     });
                     if (cancelRequested_.load()) break;
+
+                    // ── Adaptive back-off ────────────────────────────────
+                    // Sample the real process footprint before queueing more
+                    // work: over budget -> shrink the window and slow down,
+                    // well under budget -> allow the window to grow back.
+                    const int64_t budget = ramBudgetBytes_.load();
+                    if (budget > 0) {
+                        const long long rss = MemoryProbe::currentPhysicalBytes();
+                        observedRss_.store(rss);
+                        const int before = currentWindow_.load();
+                        if (rss > budget && before > 1) {
+                            currentWindow_.store(before - 1);
+                            adaptiveThrottle = (std::min)(adaptiveThrottle + 20, 200);
+                        } else if (rss * 10 < budget * 6 && before < maxWindow_.load()) {
+                            currentWindow_.store(before + 1);
+                            adaptiveThrottle = (std::max)(0, adaptiveThrottle - 20);
+                        }
+                        const int now = currentWindow_.load();
+                        if (now != before) {
+                            emit concurrencyChanged(now);
+                        }
+                    }
 
                     const DocumentBatchJob& dj = docJobs[next++];
                     sync->inFlight++;
@@ -560,9 +598,10 @@ void TaskManager::start() {
 
                     // Deliberate slow-down for very large batches so the machine
                     // (and the UI) stays responsive.
-                    if (throttle > 0 && next < jobCount && !cancelRequested_.load()) {
+                    const int pause = throttle + adaptiveThrottle;
+                    if (pause > 0 && next < jobCount && !cancelRequested_.load()) {
                         lk.unlock();
-                        for (int waited = 0; waited < throttle && !cancelRequested_.load(); waited += 10) {
+                        for (int waited = 0; waited < pause && !cancelRequested_.load(); waited += 10) {
                             QThread::msleep(10);
                         }
                         lk.lock();

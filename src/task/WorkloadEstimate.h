@@ -44,6 +44,7 @@ struct WorkloadEstimate {
     int watermarkCount = 0;     // total output documents (subtasks)
     int64_t estimatedPages = 0; // page rasterizations (= pages x watermarks)
     int64_t pageImageBytes = 0; // largest single rasterized page at maxDpi
+    int64_t maxDocSourceBytes = 0; // largest source PDF in the batch
     int64_t perDocPeakBytes = 0;// worst-case footprint of one concurrent document
     int64_t peakBytes = 0;      // peak at recommendedConcurrentDocs
     int64_t peakAtCpuConcurrencyBytes = 0;
@@ -65,6 +66,32 @@ inline constexpr int kPreflightFileThreshold = 20;
 inline constexpr int64_t kPreflightPageThreshold = 200;
 
 WorkloadEstimate estimateWorkload(const WorkloadInput& in);
+
+// ── Fully automatic concurrency ─────────────────────────────────────────────
+// Derived from the machine (cores, RAM) and the workload (file count, page
+// counts, PDF sizes). The user never chooses a "performance mode".
+struct ConcurrencyPolicy {
+    int maxConcurrentDocs = 1;   // sliding-window ceiling
+    int poolThreads = 1;         // worker threads (equals the window; more is pointless)
+    int throttleMs = 0;          // pause between submissions for very large batches
+    int64_t ramBudgetBytes = 0;  // soft ceiling used for runtime adaptation
+};
+
+inline constexpr int kAutoThrottleMs = 30;
+
+// Concurrency the CPU alone would justify. PDFium serialises page parsing and
+// rasterisation (see PdfLibrary::callMutex()), so extra workers only overlap
+// Qt-side JPEG encoding / disk IO while each holds a whole document in RAM.
+inline int cpuBasedConcurrency(int logicalCores) {
+    if (logicalCores <= 0) logicalCores = 4;
+    int c = logicalCores / 2;
+    if (c < 2) c = 2;
+    if (c > 4) c = 4;
+    return c;
+}
+
+// `logicalCores` is passed in so this header stays Qt-free.
+ConcurrencyPolicy planConcurrency(const WorkloadEstimate& est, int logicalCores);
 
 // True when the batch is large or memory-tight enough to warrant a dialog.
 bool needsPreflightWarning(const WorkloadEstimate& e);

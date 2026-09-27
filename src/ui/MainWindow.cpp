@@ -40,6 +40,7 @@
 #include <QCheckBox>
 #include <QRadioButton>
 #include <QStackedWidget>
+#include <QThread>
 #include <QButtonGroup>
 #include <QMenu>
 #include <QSignalBlocker>
@@ -51,6 +52,15 @@ namespace pdfmark {
 // Pause inserted between job submissions when a batch is much larger than the
 // concurrency window ("process progressively", keeps the machine responsive).
 static constexpr int kThrottleMs = 30;
+
+// File table layout. Only two columns are visible; everything else the logic
+// needs is stored in data roles on the name item.
+static constexpr int kCheckColumn = 0;
+static constexpr int kNameColumn  = 1;
+static constexpr int kPathRole    = Qt::UserRole;
+static constexpr int kPagesRole   = Qt::UserRole + 1;
+static constexpr int kStatusRole  = Qt::UserRole + 2;
+
 
 // Human hint for the watermark opacity slider (shared by the slider, the
 // spin box and programmatic style application so they can never disagree).
@@ -71,7 +81,7 @@ WatermarkRow::WatermarkRow(const QString& initialText, int index, QWidget* paren
 
     checkBox_ = new QCheckBox(this);
     checkBox_->setChecked(true);
-    checkBox_->setToolTip("勾选：生成当前 PDF 时包含此水印；取消勾选：跳过此水印");
+    checkBox_->setToolTip("勾选：生成时包含此水印；取消勾选：跳过此水印");
     h->addWidget(checkBox_);
 
     lineEdit_ = new QLineEdit(this);
@@ -163,15 +173,24 @@ void MainWindow::setupUi() {
     auto* addFolderBtn = new QPushButton("添加文件夹...", topBox);
     auto* clearBtn = new QPushButton("清空列表", topBox);
     auto* removeSelBtn = new QPushButton("删除选中文件", topBox);
+    selectAllBtn_ = new QPushButton("全选", topBox);
+    selectNoneBtn_ = new QPushButton("全不选", topBox);
     addFilesBtn->setStyleSheet("padding: 6px 14px; font-weight: bold;");
     addFolderBtn->setStyleSheet("padding: 6px 14px;");
     clearBtn->setStyleSheet("padding: 6px 14px;");
     removeSelBtn->setStyleSheet("padding: 6px 14px; color: #cc0000;");
+    selectAllBtn_->setStyleSheet("padding: 6px 10px;");
+    selectNoneBtn_->setStyleSheet("padding: 6px 10px;");
+    selectAllBtn_->setToolTip("勾选列表中的所有 PDF");
+    selectNoneBtn_->setToolTip("取消勾选所有 PDF");
 
     topLayout->addWidget(addFilesBtn);
     topLayout->addWidget(addFolderBtn);
     topLayout->addWidget(clearBtn);
     topLayout->addWidget(removeSelBtn);
+    topLayout->addSpacing(12);
+    topLayout->addWidget(selectAllBtn_);
+    topLayout->addWidget(selectNoneBtn_);
     topLayout->addStretch();
     mainLayout->addWidget(topBox);
 
@@ -188,12 +207,12 @@ void MainWindow::setupUi() {
     auto* leftLayout = new QVBoxLayout(leftContainer);
     leftLayout->setContentsMargins(0, 0, 0, 0);
 
-    fileTable_ = new QTableWidget(0, 4, leftContainer);
-    fileTable_->setHorizontalHeaderLabels({"文件名", "页数", "状态", "完整路径"});
-    fileTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-    fileTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-    fileTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
-    fileTable_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+    fileTable_ = new QTableWidget(0, 2, leftContainer);
+    fileTable_->setHorizontalHeaderLabels({"", "文件名"});
+    fileTable_->horizontalHeader()->setSectionResizeMode(kCheckColumn, QHeaderView::Fixed);
+    fileTable_->horizontalHeader()->resizeSection(kCheckColumn, 34);
+    fileTable_->horizontalHeader()->setSectionResizeMode(kNameColumn, QHeaderView::Stretch);
+    fileTable_->verticalHeader()->setVisible(false);
     fileTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
     fileTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     fileTable_->setAlternatingRowColors(true);
@@ -313,7 +332,7 @@ void MainWindow::setupUi() {
     btnRow->setSpacing(6);
     loadTemplateBtn_ = new QPushButton("从模板载入", customPage);
     loadTemplateBtn_->setStyleSheet("padding: 6px 14px;");
-    loadTemplateBtn_->setToolTip("选择一个模板，把它的文字与样式填入当前 PDF 的编辑区（不生成），之后可自由微调");
+    loadTemplateBtn_->setToolTip("把模板的文字与样式填入编辑区（不生成）；未选择 PDF 时填入全局草稿，之后可自由微调");
     loadTemplateBtn_->setMenu(new QMenu(loadTemplateBtn_));
     addWatermarkBtn_ = new QPushButton("+ 添加水印", customPage);
     addWatermarkBtn_->setStyleSheet("padding: 6px 14px; font-weight: bold;");
@@ -461,41 +480,26 @@ void MainWindow::setupUi() {
     ctlRow->addWidget(previewBtn_);
     ctlRow->addSpacing(8);
 
-    ctlRow->addWidget(new QLabel("性能:", statusCard));
-    perfCombo_ = new QComboBox(statusCard);
-    perfCombo_->addItem("保守（1 个文件）", static_cast<int>(PerformanceMode::Low));
-    perfCombo_->addItem("日常推荐（2 个文件）", static_cast<int>(PerformanceMode::Normal));
-    perfCombo_->addItem("火力全开（最多 4 个）", static_cast<int>(PerformanceMode::High));
-    perfCombo_->setCurrentIndex(1);
-    perfCombo_->setMinimumWidth(150);
-    perfCombo_->setToolTip("引擎限制：PDFium 非线程安全，页面解析与光栅化已全局串行；\n"
-                           "并发只用于重叠水印绘制、JPEG 编码与磁盘 I/O。\n"
-                           "保守：同一时刻只处理 1 个文件，最省内存\n"
-                           "日常推荐：2 个文件并行，速度与内存均衡\n"
-                           "火力全开：最多 4 个文件并行，大页/扫描件更快，内存占用更高");
-    ctlRow->addWidget(perfCombo_);
-    ctlRow->addSpacing(8);
-
     cancelBtn_ = new QPushButton("取消", statusCard);
     cancelBtn_->setEnabled(false);
     cancelBtn_->setStyleSheet("padding: 5px 12px;");
     connect(cancelBtn_, &QPushButton::clicked, this, &MainWindow::onCancelClicked);
     ctlRow->addWidget(cancelBtn_);
 
-    startSelectedBtn_ = new QPushButton("生成当前 PDF", statusCard);
-    startSelectedBtn_->setEnabled(false);
-    startSelectedBtn_->setToolTip("生成当前 PDF（自定义模式下只生成已勾选的水印）");
-    startSelectedBtn_->setStyleSheet(
+    startCheckedBtn_ = new QPushButton("生成勾选的 PDF", statusCard);
+    startCheckedBtn_->setEnabled(false);
+    startCheckedBtn_->setToolTip("只生成左侧已勾选的 PDF");
+    startCheckedBtn_->setStyleSheet(
         "QPushButton { background-color: #107c10; color: white; font-weight: bold; "
         "padding: 7px 16px; border-radius: 4px; font-size: 14px; }"
         "QPushButton:hover { background-color: #0b5c0b; }"
         "QPushButton:pressed { background-color: #094509; }"
         "QPushButton:disabled { background-color: #cccccc; color: #888888; }");
-    connect(startSelectedBtn_, &QPushButton::clicked, this, &MainWindow::onStartSelectedClicked);
-    ctlRow->addWidget(startSelectedBtn_);
+    connect(startCheckedBtn_, &QPushButton::clicked, this, &MainWindow::onStartCheckedClicked);
+    ctlRow->addWidget(startCheckedBtn_);
 
     startAllBtn_ = new QPushButton("生成全部 PDF", statusCard);
-    startAllBtn_->setToolTip("忽略勾选，生成列表中所有 PDF 的所有水印");
+    startAllBtn_->setToolTip("生成列表中的所有 PDF");
     startAllBtn_->setStyleSheet(
         "QPushButton { background-color: #0078d4; color: white; font-weight: bold; "
         "padding: 7px 16px; border-radius: 4px; font-size: 14px; }"
@@ -531,9 +535,20 @@ void MainWindow::setupConnections() {
         if (taskManager_.isRunning()) onCancelClicked();
     });
 
-    // File selection change
+    // File selection change (row highlight = which PDF the right panel edits)
     connect(fileTable_, &QTableWidget::itemSelectionChanged,
             this, &MainWindow::onFileSelectionChanged);
+
+    // Checkbox toggles only change the batch scope, not the edit focus.
+    connect(fileTable_, &QTableWidget::itemChanged, this, [this](QTableWidgetItem* item) {
+        if (item && item->column() == kCheckColumn) {
+            refreshActionLabels();
+            updateUiState(taskManager_.isRunning());
+        }
+    });
+
+    connect(selectAllBtn_, &QPushButton::clicked, this, &MainWindow::onSelectAllFiles);
+    connect(selectNoneBtn_, &QPushButton::clicked, this, &MainWindow::onSelectNoFiles);
 
     // Add watermark row button
     connect(addWatermarkBtn_, &QPushButton::clicked, this, &MainWindow::addWatermarkRow);
@@ -572,6 +587,9 @@ void MainWindow::setupConnections() {
     connect(&taskManager_, &TaskManager::fileFinished, this, &MainWindow::onFileFinished);
     connect(&taskManager_, &TaskManager::allFinished, this, &MainWindow::onAllFinished);
     connect(&taskManager_, &TaskManager::cancelled, this, &MainWindow::onCancelled);
+    connect(&taskManager_, &TaskManager::concurrencyChanged, this, [this](int window) {
+        statusLabel_->setText(QString("内存自适应：并发调整为 %1 个文件，继续处理…").arg(window));
+    });
     connect(&taskManager_, &TaskManager::passwordRequired, this, &MainWindow::onPasswordRequired);
     connect(&taskManager_, &TaskManager::errorOccurred, this, [this](const QString& msg) {
         QMessageBox::critical(this, "错误", "任务处理发生异常：\n" + msg);
@@ -638,8 +656,8 @@ WatermarkConfig MainWindow::currentConfig() const {
 
 
 void MainWindow::saveCurrentWatermarks() {
-    if (currentSelectedFile_.isEmpty()) return;
-
+    // The empty key is the global draft used while no PDF is selected, so a
+    // template can be authored without loading any file.
     const WatermarkConfig style = styleFromUi();
     std::vector<WatermarkConfig> configs;
     for (int i = 0; i < watermarkLayout_->count(); ++i) {
@@ -669,12 +687,9 @@ void MainWindow::loadWatermarksForSelectedFile() {
         delete child;
     }
 
-    if (currentSelectedFile_.isEmpty()) {
-        addWatermarkBtn_->setEnabled(false);
-        return;
-    }
-    addWatermarkBtn_->setEnabled(true);
-    // Sync style controls from per-PDF config or defaults
+    // Works for key "" too: that is the global draft shown when no PDF is
+    // selected, which is what lets users build a template file-free.
+    // Sync style controls from the stored style (or defaults)
     auto itStyle = perPdfConfigMap_.find(currentSelectedFile_);
     if (itStyle != perPdfConfigMap_.end()) {
         applyStyleToUi(itStyle->second);
@@ -748,8 +763,7 @@ void MainWindow::onFileSelectionChanged() {
         currentSelectedFile_.clear();
     } else {
         int row = fileTable_->row(items.first());
-        auto* item = fileTable_->item(row, 3);
-        currentSelectedFile_ = item ? item->text() : QString();
+        currentSelectedFile_ = pathAt(row);
     }
     loadWatermarksForSelectedFile();
     refreshScopeLabel();
@@ -765,31 +779,7 @@ void MainWindow::onAddFiles() {
 
     bool wasEmpty = fileTable_->rowCount() == 0;
     for (const auto& file : files) {
-        try {
-            fs::path p = qstringToPath(file);
-            taskManager_.addFile(p);
-
-            int row = fileTable_->rowCount();
-            fileTable_->insertRow(row);
-            QFileInfo fi(file);
-            fileTable_->setItem(row, 0, new QTableWidgetItem(fi.fileName()));
-
-            int pages = 0;
-            try {
-                auto docRef = PdfDocument::open(p);
-                pages = PdfDocument::pageCount(docRef.first.get());
-            } catch (...) {
-                // Might be encrypted or bad format, will show 0 or handle later
-            }
-
-            fileTable_->setItem(row, 1, new QTableWidgetItem(pages > 0 ? QString::number(pages) : "待检测"));
-            fileTable_->setItem(row, 2, new QTableWidgetItem("等待处理"));
-            fileTable_->setItem(row, 3, new QTableWidgetItem(file));
-        } catch (const std::exception& e) {
-            qWarning() << "Failed to add file:" << file << e.what();
-        } catch (...) {
-            qWarning() << "Unknown error adding file:" << file;
-        }
+        appendFileRow(file);
     }
 
     rebuildFileIndex();
@@ -811,22 +801,7 @@ void MainWindow::onAddFolder() {
     QFileInfoList list = d.entryInfoList(filters, QDir::Files, QDir::Name);
 
     for (const auto& fi : list) {
-        try {
-            QString pathStr = fi.absoluteFilePath();
-            fs::path p = qstringToPath(pathStr);
-            taskManager_.addFile(p);
-
-            int row = fileTable_->rowCount();
-            fileTable_->insertRow(row);
-            fileTable_->setItem(row, 0, new QTableWidgetItem(fi.fileName()));
-            fileTable_->setItem(row, 1, new QTableWidgetItem("待检测"));
-            fileTable_->setItem(row, 2, new QTableWidgetItem("等待处理"));
-            fileTable_->setItem(row, 3, new QTableWidgetItem(pathStr));
-        } catch (const std::exception& e) {
-            qWarning() << "Failed to add folder item:" << fi.absoluteFilePath() << e.what();
-        } catch (...) {
-            qWarning() << "Unknown error adding folder item:" << fi.absoluteFilePath();
-        }
+        appendFileRow(fi.absoluteFilePath());
     }
     rebuildFileIndex();
     int added = fileTable_->rowCount() - beforeCount;
@@ -851,29 +826,7 @@ void MainWindow::dropEvent(QDropEvent* event) {
         QString file = url.toLocalFile();
         if (!file.endsWith(".pdf", Qt::CaseInsensitive)) continue;
 
-        try {
-            fs::path p = qstringToPath(file);
-            taskManager_.addFile(p);
-
-            int row = fileTable_->rowCount();
-            fileTable_->insertRow(row);
-            QFileInfo fi(file);
-            fileTable_->setItem(row, 0, new QTableWidgetItem(fi.fileName()));
-
-            int pages = 0;
-            try {
-                auto docRef = PdfDocument::open(p);
-                pages = PdfDocument::pageCount(docRef.first.get());
-            } catch (...) {}
-
-            fileTable_->setItem(row, 1, new QTableWidgetItem(pages > 0 ? QString::number(pages) : "待检测"));
-            fileTable_->setItem(row, 2, new QTableWidgetItem("等待处理"));
-            fileTable_->setItem(row, 3, new QTableWidgetItem(file));
-        } catch (const std::exception& e) {
-            qWarning() << "Failed to add dropped file:" << file << e.what();
-        } catch (...) {
-            qWarning() << "Unknown error adding dropped file:" << file;
-        }
+        appendFileRow(file);
     }
     rebuildFileIndex();
     if (wasEmpty && fileTable_->rowCount() > 0) {
@@ -895,13 +848,17 @@ void MainWindow::onClearFiles() {
         if (answer != QMessageBox::Yes) return;
     }
     fileTable_->setRowCount(0);
-    fileWatermarkConfigs_.clear();
-    perPdfConfigMap_.clear();
+    // Keep the global draft (key "") so a half-authored template survives.
+    std::erase_if(fileWatermarkConfigs_, [](const auto& kv) { return !kv.first.isEmpty(); });
+    std::erase_if(perPdfConfigMap_, [](const auto& kv) { return !kv.first.isEmpty(); });
     currentSelectedFile_.clear();
     fileNameToRow_.clear();
     taskManager_.clear();
     totalProgressBar_->setValue(0);
     loadWatermarksForSelectedFile();
+    refreshScopeLabel();
+    refreshActionLabels();
+    updateUiState(false);
     statusLabel_->setText("列表已清空。");
 }
 
@@ -923,28 +880,20 @@ void MainWindow::updateUiState(bool running) {
     const bool hasFile = !currentSelectedFile_.isEmpty();
     const bool hasRows = fileTable_->rowCount() > 0;
 
-    // "生成当前 PDF" in custom mode needs at least one checked, non-empty watermark.
-    // In template mode the template is applied automatically, so having a
-    // template is enough.
-    bool hasCheckedWatermark = false;
-    auto itChecked = fileWatermarkConfigs_.find(currentSelectedFile_);
-    if (hasFile && itChecked != fileWatermarkConfigs_.end()) {
-        for (const auto& cfg : itChecked->second) {
-            if (cfg.selected && !cfg.text.empty()) {
-                hasCheckedWatermark = true;
-                break;
-            }
-        }
-    }
-
+    // The checkbox column decides the batch scope, so the only gate for
+    // "生成勾选的 PDF" is having something checked (plus a template in
+    // template mode, which is applied automatically).
+    const int checked = checkedCount();
     const bool tplMode = isTemplateMode();
     if (tplMode) {
+        startCheckedBtn_->setEnabled(!running && checked > 0 && hasTemplate);
         startAllBtn_->setEnabled(!running && hasRows && hasTemplate);
-        startSelectedBtn_->setEnabled(!running && hasFile && hasTemplate);
     } else {
+        startCheckedBtn_->setEnabled(!running && checked > 0);
         startAllBtn_->setEnabled(!running && hasRows);
-        startSelectedBtn_->setEnabled(!running && hasCheckedWatermark);
     }
+    selectAllBtn_->setEnabled(!running && hasRows);
+    selectNoneBtn_->setEnabled(!running && hasRows);
 
     // Mode switch
     modeTemplateBtn_->setEnabled(!running);
@@ -955,10 +904,11 @@ void MainWindow::updateUiState(bool running) {
     manageTemplateBtn_->setEnabled(!running);
     gotoCustomBtn_->setEnabled(!running);
 
-    // Custom-mode page (per-PDF editing)
-    addWatermarkBtn_->setEnabled(!running && hasFile);
-    loadTemplateBtn_->setEnabled(!running && hasFile && !templateStore_.templates().empty());
-    saveTemplateBtn_->setEnabled(!running && hasFile);
+    // Custom-mode page. Editing is always allowed: with no PDF selected the
+    // rows are the global draft used to create a template.
+    addWatermarkBtn_->setEnabled(!running);
+    loadTemplateBtn_->setEnabled(!running && !templateStore_.templates().empty());
+    saveTemplateBtn_->setEnabled(!running && hasAnyWatermarkRow());
     depthSlider_->setEnabled(!running);
     depthSpin_->setEnabled(!running);
     rotationSpin_->setEnabled(!running);
@@ -968,7 +918,6 @@ void MainWindow::updateUiState(bool running) {
 
     // Shared
     previewBtn_->setEnabled(!running);
-    perfCombo_->setEnabled(!running);
     outputDirEdit_->setEnabled(!running);
 }
 
@@ -995,9 +944,8 @@ void MainWindow::onRemoveSelectedFile() {
 
     for (int row : selectedRows) {
         if (row < 0 || row >= fileTable_->rowCount()) continue;
-        QTableWidgetItem* pathItem = fileTable_->item(row, 3);
-        if (!pathItem) continue;
-        QString filePath = pathItem->text();
+        const QString filePath = pathAt(row);
+        if (filePath.isEmpty()) continue;
         fileTable_->removeRow(row);
         fileWatermarkConfigs_.erase(filePath);
         perPdfConfigMap_.erase(filePath);
@@ -1020,10 +968,137 @@ void MainWindow::onRemoveSelectedFile() {
     statusLabel_->setText(QString("已移除 %1 个文件。剩余 %2 个文件。")
         .arg(selectedRows.size()).arg(remaining));
 }
+void MainWindow::appendFileRow(const QString& filePath) {
+    try {
+        taskManager_.addFile(qstringToPath(filePath));
+
+        const int row = fileTable_->rowCount();
+        fileTable_->insertRow(row);
+
+        // Column 0: participation checkbox. Set the state BEFORE inserting so
+        // construction does not emit itemChanged.
+        auto* checkItem = new QTableWidgetItem();
+        checkItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsUserCheckable);
+        checkItem->setCheckState(Qt::Checked);
+        checkItem->setToolTip("勾选：参与「生成勾选的 PDF」");
+        fileTable_->setItem(row, kCheckColumn, checkItem);
+
+        // Column 1: file name; path / pages / status live in hidden data roles.
+        auto* nameItem = new QTableWidgetItem(QFileInfo(filePath).fileName());
+        nameItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
+        fileTable_->setItem(row, kNameColumn, nameItem);
+        setPathAt(row, filePath);
+
+        // Page count is needed by the memory budget, so it is always computed
+        // (encrypted / unreadable files fall back to the 10-page assumption).
+        int pages = 0;
+        try {
+            auto docRef = PdfDocument::open(qstringToPath(filePath));
+            pages = PdfDocument::pageCount(docRef.first.get());
+        } catch (...) {
+            pages = 0;
+        }
+        setPagesAt(row, pages);
+        setStatus(row, QStringLiteral("等待处理"));
+    } catch (const std::exception& e) {
+        qWarning() << "Failed to add file:" << filePath << e.what();
+    } catch (...) {
+        qWarning() << "Unknown error adding file:" << filePath;
+    }
+}
+
+QString MainWindow::pathAt(int row) const {
+    QTableWidgetItem* item = fileTable_->item(row, kNameColumn);
+    return item ? item->data(kPathRole).toString() : QString();
+}
+
+void MainWindow::setPathAt(int row, const QString& path) {
+    if (QTableWidgetItem* item = fileTable_->item(row, kNameColumn)) {
+        item->setData(kPathRole, path);
+    }
+}
+
+int MainWindow::pagesAt(int row) const {
+    QTableWidgetItem* item = fileTable_->item(row, kNameColumn);
+    return item ? item->data(kPagesRole).toInt() : 0;
+}
+
+void MainWindow::setPagesAt(int row, int pages) {
+    if (QTableWidgetItem* item = fileTable_->item(row, kNameColumn)) {
+        item->setData(kPagesRole, pages);
+    }
+}
+
+QString MainWindow::statusAt(int row) const {
+    QTableWidgetItem* item = fileTable_->item(row, kNameColumn);
+    return item ? item->data(kStatusRole).toString() : QString();
+}
+
+void MainWindow::setStatus(int row, const QString& status, const QString& tooltip) {
+    QTableWidgetItem* item = fileTable_->item(row, kNameColumn);
+    if (!item) return;
+    item->setData(kStatusRole, status);
+    item->setToolTip(tooltip.isEmpty() ? status : tooltip);
+
+    // Status is expressed by colour + tooltip instead of a dedicated column.
+    if (status.startsWith(QStringLiteral("失败"))) {
+        item->setForeground(QColor(0xC0, 0x2B, 0x2B));
+    } else if (status.startsWith(QStringLiteral("完成"))) {
+        item->setForeground(QColor(0x10, 0x7C, 0x10));
+    } else if (status.startsWith(QStringLiteral("处理中"))) {
+        item->setForeground(QColor(0x00, 0x78, 0xD4));
+    } else {
+        item->setData(Qt::ForegroundRole, QVariant());
+    }
+}
+
+bool MainWindow::isCheckedAt(int row) const {
+    QTableWidgetItem* item = fileTable_->item(row, kCheckColumn);
+    return item && item->checkState() == Qt::Checked;
+}
+
+void MainWindow::setCheckedAt(int row, bool on) {
+    if (QTableWidgetItem* item = fileTable_->item(row, kCheckColumn)) {
+        item->setCheckState(on ? Qt::Checked : Qt::Unchecked);
+    }
+}
+
+std::vector<QString> MainWindow::checkedPaths() const {
+    std::vector<QString> out;
+    for (int r = 0; r < fileTable_->rowCount(); ++r) {
+        if (!isCheckedAt(r)) continue;
+        const QString p = pathAt(r);
+        if (!p.isEmpty()) out.push_back(p);
+    }
+    return out;
+}
+
+int MainWindow::checkedCount() const {
+    int n = 0;
+    for (int r = 0; r < fileTable_->rowCount(); ++r) {
+        if (isCheckedAt(r)) ++n;
+    }
+    return n;
+}
+
+void MainWindow::onSelectAllFiles() {
+    QSignalBlocker block(fileTable_);
+    for (int r = 0; r < fileTable_->rowCount(); ++r) setCheckedAt(r, true);
+    refreshActionLabels();
+    updateUiState(taskManager_.isRunning());
+}
+
+void MainWindow::onSelectNoFiles() {
+    QSignalBlocker block(fileTable_);
+    for (int r = 0; r < fileTable_->rowCount(); ++r) setCheckedAt(r, false);
+    refreshActionLabels();
+    updateUiState(taskManager_.isRunning());
+}
+
 void MainWindow::rebuildFileIndex() {
     fileNameToRow_.clear();
     for (int r = 0; r < fileTable_->rowCount(); ++r) {
-        QTableWidgetItem* nameItem = fileTable_->item(r, 0);
+        QTableWidgetItem* nameItem = fileTable_->item(r, kNameColumn);
         if (!nameItem) continue;
         if (!fileNameToRow_.contains(nameItem->text())) {
             fileNameToRow_.insert(nameItem->text(), r);
@@ -1037,21 +1112,15 @@ WorkloadEstimate MainWindow::estimateCurrentWorkload(
     in.maxDpi = 200;
     in.totalRamBytes = MemoryProbe::totalPhysicalBytes();
     in.currentRssBytes = MemoryProbe::currentPhysicalBytes();
-    in.cpuCap = WorkerPool::idealWorkerCount(
-        static_cast<PerformanceMode>(perfCombo_->currentData().toInt()));
-    if (in.cpuCap < 1) in.cpuCap = 1;
+    // Concurrency is decided automatically from cores + RAM + workload.
+    in.cpuCap = cpuBasedConcurrency(QThread::idealThreadCount());
 
     // Page counts come from the file table (column 1); "待检测" => unknown (0).
     std::unordered_map<std::string, int> pagesByPath;
     for (int r = 0; r < fileTable_->rowCount(); ++r) {
-        QTableWidgetItem* pathItem = fileTable_->item(r, 3);
-        if (!pathItem) continue;
-        bool ok = false;
-        int pages = 0;
-        if (QTableWidgetItem* pageItem = fileTable_->item(r, 1)) {
-            pages = pageItem->text().toInt(&ok);
-        }
-        pagesByPath[pathToString(qstringToPath(pathItem->text()))] = ok ? pages : 0;
+        const QString p = pathAt(r);
+        if (p.isEmpty()) continue;
+        pagesByPath[pathToString(qstringToPath(p))] = pagesAt(r);
     }
 
     std::unordered_map<std::string, size_t> indexOf;
@@ -1077,18 +1146,20 @@ WorkloadEstimate MainWindow::estimateCurrentWorkload(
 }
 
 bool MainWindow::confirmBatchRun(const std::vector<TaskManager::FileSubtask>& subtasks,
-                                 bool onlySelected) {
+                                 BatchScope scope) {
     const WorkloadEstimate est = estimateCurrentWorkload(subtasks);
-    const PerformanceMode mode =
-        static_cast<PerformanceMode>(perfCombo_->currentData().toInt());
-    const int cpuCap = std::max(1, WorkerPool::idealWorkerCount(mode));
-    const int recommended = std::max(1, est.recommendedConcurrentDocs);
-    const bool bigBatch = est.fileCount > 2 * recommended;
+    const int cores = (std::max)(1, QThread::idealThreadCount());
+    const ConcurrencyPolicy policy = planConcurrency(est, cores);
+    const int recommended = policy.maxConcurrentDocs;
+    const bool bigBatch = policy.throttleMs > 0;
     const bool risky = needsPreflightWarning(est);
 
-    auto applyPlan = [this](int docs, bool throttle) {
-        taskManager_.setMaxConcurrentDocuments(docs);
-        taskManager_.setThrottleMs(throttle ? kThrottleMs : 0);
+    auto applyPlan = [this, &policy](int docs, bool throttle) {
+        ConcurrencyPolicy applied = policy;
+        applied.maxConcurrentDocs = docs;
+        applied.poolThreads = docs;
+        applied.throttleMs = throttle ? kAutoThrottleMs : 0;
+        taskManager_.setConcurrencyPolicy(applied);
     };
     auto mb = [](int64_t bytes) {
         return QString::number(static_cast<double>(bytes) / (1024.0 * 1024.0), 'f', 0);
@@ -1098,6 +1169,16 @@ bool MainWindow::confirmBatchRun(const std::vector<TaskManager::FileSubtask>& su
         applyPlan(recommended, bigBatch);
         return true;
     }
+
+    const int64_t totalRam = MemoryProbe::totalPhysicalBytes();
+    const QString autoLine = QString(
+        "自动并发：%1 个文件（%2 核 · 内存 %3 GB · 内存预算 %4 MB · 最大 PDF %5 MB）")
+        .arg(recommended)
+        .arg(cores)
+        .arg(totalRam > 0 ? QString::number(static_cast<double>(totalRam) / (1024.0 * 1024.0 * 1024.0), 'f', 0)
+                          : QStringLiteral("?"))
+        .arg(mb(policy.ramBudgetBytes))
+        .arg(mb(est.maxDocSourceBytes));
 
     // Writing files cannot be undone, so always state exactly what is about to
     // happen and where it lands.
@@ -1109,10 +1190,13 @@ bool MainWindow::confirmBatchRun(const std::vector<TaskManager::FileSubtask>& su
     if (isTemplateMode()) {
         const WatermarkTemplate tpl = selectedTemplate();
         sourceDesc = QString("模板「%1」").arg(QString::fromUtf8(tpl.name.c_str()));
-    } else if (onlySelected) {
-        sourceDesc = QStringLiteral("当前 PDF 中已勾选的水印");
     } else {
-        sourceDesc = QStringLiteral("各文件自己的水印配置");
+        sourceDesc = QStringLiteral("各文件自己的水印配置（每个文件只含已勾选的水印）");
+    }
+    if (scope == BatchScope::Checked) {
+        sourceDesc += QStringLiteral(" · 范围：勾选的 %1 个 PDF").arg(checkedCount());
+    } else {
+        sourceDesc += QStringLiteral(" · 范围：列表中的全部 %1 个 PDF").arg(fileTable_->rowCount());
     }
 
     QString detail = QString(
@@ -1124,19 +1208,18 @@ bool MainWindow::confirmBatchRun(const std::vector<TaskManager::FileSubtask>& su
         .arg(sourceDesc)
         .arg(outDir);
 
+    detail += "\n" + autoLine;
     if (risky) {
         detail += QString(
             "\n\n资源评估：\n"
             "  • 处理页数：约 %1 页（页数未知的按 10 页估算：%2）\n"
             "  • 单文件峰值内存：约 %3 MB\n"
-            "  • 推荐并发：%4 个文件（当前性能模式为 %5 个）\n"
-            "  • 预计峰值内存：约 %6 MB，可用约 %7 MB\n"
-            "  • 内存风险：%8")
+            "  • 预计峰值内存：约 %4 MB，可用约 %5 MB\n"
+            "  • 内存风险：%6\n"
+            "运行中会按实际内存占用自动增减并发并限速。")
             .arg(est.estimatedPages)
             .arg(est.pagesEstimated ? "是" : "否")
             .arg(mb(est.perDocPeakBytes))
-            .arg(recommended)
-            .arg(cpuCap)
             .arg(mb(std::max(est.peakBytes, est.perDocPeakBytes)))
             .arg(mb(est.usableRamBytes))
             .arg(QString::fromUtf8(workloadRiskLabel(est.risk)));
@@ -1154,27 +1237,18 @@ bool MainWindow::confirmBatchRun(const std::vector<TaskManager::FileSubtask>& su
             : "建议使用推荐设置：程序会自动分批处理，并在必要时降速，以避免卡顿或崩溃。");
     }
 
-    QPushButton* primaryBtn = nullptr;
-    QPushButton* currentBtn = nullptr;
-    QPushButton* cancelBtn = nullptr;
-    if (risky) {
-        primaryBtn = box.addButton("按推荐设置继续", QMessageBox::AcceptRole);
-        currentBtn = box.addButton("按当前设置继续", QMessageBox::DestructiveRole);
-        cancelBtn = box.addButton("取消", QMessageBox::RejectRole);
-    } else {
-        primaryBtn = box.addButton("开始生成", QMessageBox::AcceptRole);
-        cancelBtn = box.addButton("取消", QMessageBox::RejectRole);
-    }
+    QPushButton* primaryBtn = box.addButton(
+        est.risk == WorkloadRisk::Risky ? "仍要生成（自动降速）" : "开始生成",
+        QMessageBox::AcceptRole);
+    QPushButton* cancelBtn = box.addButton("取消", QMessageBox::RejectRole);
 
-    QCheckBox* dontAsk = new QCheckBox(risky ? "本次会话不再提示资源检查"
-                                             : "本次会话不再提示生成确认", &box);
+    QCheckBox* dontAsk = new QCheckBox("本次会话不再提示生成确认", &box);
     box.setCheckBox(dontAsk);
     box.setDefaultButton(est.risk == WorkloadRisk::Risky ? cancelBtn : primaryBtn);
 
     box.exec();
     if (dontAsk->isChecked()) {
-        if (risky) preflightSuppressed_ = true;
-        else suppressBatchConfirm_ = true;
+        suppressBatchConfirm_ = true;
     }
 
     if (box.clickedButton() == cancelBtn) {
@@ -1182,42 +1256,23 @@ bool MainWindow::confirmBatchRun(const std::vector<TaskManager::FileSubtask>& su
         return false;
     }
 
-    if (risky && box.clickedButton() == currentBtn) {
-        if (est.risk == WorkloadRisk::Risky) {
-            const auto answer = QMessageBox::warning(
-                this, "确认风险",
-                "预计峰值内存将超过当前可用内存，程序可能崩溃或被系统终止。\n\n"
-                "确定仍按当前设置继续吗？",
-                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-            if (answer != QMessageBox::Yes) {
-                statusLabel_->setText("已取消生成。");
-                return false;
-            }
-        }
-        applyPlan(cpuCap, bigBatch);
-        statusLabel_->setText(QString("按当前设置运行（并发 %1）。").arg(cpuCap));
-        return true;
-    }
-
     applyPlan(recommended, bigBatch);
-    statusLabel_->setText(QString("开始生成（并发 %1%2）。")
+    statusLabel_->setText(QString("开始生成（并发 %1 · 自动%2）。")
         .arg(recommended)
-        .arg(bigBatch ? QStringLiteral("，分批+限速") : QString()));
+        .arg(bigBatch ? QStringLiteral(" · 已限速") : QString()));
     return true;
 }
 
-std::vector<TaskManager::FileSubtask> MainWindow::buildAllConfigs(bool onlySelected) {
+std::vector<TaskManager::FileSubtask> MainWindow::buildAllConfigs(BatchScope scope) {
     saveCurrentWatermarks();
     std::vector<TaskManager::FileSubtask> subtasks;
 
     for (int r = 0; r < fileTable_->rowCount(); ++r) {
-        if (onlySelected) {
-            // Only process the currently selected file
-            if (r != fileTable_->currentRow()) continue;
-        }
-        QTableWidgetItem* pathItem = fileTable_->item(r, 3);
-        if (!pathItem) continue;
-        QString filePath = pathItem->text();
+        // Scope only decides *which PDFs* take part. The per-watermark
+        // checkboxes are always honoured, so a checkbox means "include this".
+        if (scope == BatchScope::Checked && !isCheckedAt(r)) continue;
+
+        const QString filePath = pathAt(r);
         if (filePath.isEmpty()) continue;
         fs::path p = qstringToPath(filePath);
 
@@ -1225,12 +1280,7 @@ std::vector<TaskManager::FileSubtask> MainWindow::buildAllConfigs(bool onlySelec
         if (it == fileWatermarkConfigs_.end() || it->second.empty()) {
             continue;
         }
-        // "生成所选" honours the per-watermark checkboxes; "生成全部" ignores
-        // them and generates every configured watermark.
-        std::vector<WatermarkConfig> configs = it->second;
-        if (onlySelected) {
-            configs = filterSelectedWatermarks(configs);
-        }
+        const std::vector<WatermarkConfig> configs = filterSelectedWatermarks(it->second);
         for (const auto& cfg : configs) {
             if (cfg.text.empty()) continue;
             subtasks.push_back({ p, cfg });
@@ -1240,20 +1290,22 @@ std::vector<TaskManager::FileSubtask> MainWindow::buildAllConfigs(bool onlySelec
 }
 
 void MainWindow::onStartAllClicked() {
-    runBatch(false);
+    runBatch(BatchScope::All);
 }
 
-void MainWindow::onStartSelectedClicked() {
-    if (fileTable_->currentRow() < 0) {
-        QMessageBox::warning(this, "提示", "请先在左侧列表选择一个 PDF 文件。");
-        return;
-    }
-    runBatch(true);
+void MainWindow::onStartCheckedClicked() {
+    runBatch(BatchScope::Checked);
 }
 
-void MainWindow::runBatch(bool onlySelected) {
+void MainWindow::runBatch(BatchScope scope) {
     if (fileTable_->rowCount() == 0) {
         QMessageBox::warning(this, "提示", "请先添加至少一个 PDF 文件。");
+        return;
+    }
+    if (scope == BatchScope::Checked && checkedCount() == 0) {
+        QMessageBox::warning(this, "提示",
+            "请先在左侧勾选至少一个 PDF。\n\n"
+            "（也可以用「全选」勾选全部，或直接点「生成全部 PDF」。）");
         return;
     }
 
@@ -1268,41 +1320,36 @@ void MainWindow::runBatch(bool onlySelected) {
                 "还没有模板？点上面的「去「自定义」创建模板」。");
             return;
         }
-        if (onlySelected) {
-            if (currentSelectedFile_.isEmpty()) {
-                QMessageBox::warning(this, "提示", "请先在左侧列表选择一个 PDF 文件。");
-                return;
-            }
-            applyTemplateToCurrentUi(tpl);
-        } else {
+        if (scope == BatchScope::All) {
             applyTemplateToAllFiles(tpl);
+        } else {
+            for (const QString& path : checkedPaths()) {
+                applyTemplateToFile(tpl, path);
+            }
+            if (!currentSelectedFile_.isEmpty()) loadWatermarksForSelectedFile();
         }
     }
 
-    auto subtasks = buildAllConfigs(onlySelected);
+    auto subtasks = buildAllConfigs(scope);
     if (subtasks.empty()) {
-        if (onlySelected) {
-            QMessageBox::warning(this, "提示",
-                "当前 PDF 没有已勾选的水印。\n\n"
-                "操作：在「自定义」模式下勾选至少一条水印文字，再点「生成当前 PDF」。");
-        } else {
-            QMessageBox::warning(this, "提示",
-                "列表中的文件还没有可用的水印。\n\n"
-                "操作：在「自定义」模式下为文件添加水印文字，"
-                "或用「存为模板...」存成模板后在「模板」模式下生成。");
-        }
+        QMessageBox::warning(this, "提示",
+            "没有可生成的水印。\n\n"
+            "可能原因：\n"
+            "  • 勾选的 PDF 还没有水印文字\n"
+            "  • 水印文字前面的复选框没有勾上（勾上才会生成）\n\n"
+            "操作：在「自定义」模式下添加/勾选水印，"
+            "或存成模板后在「模板」模式下生成。");
         return;
     }
 
     // Pre-flight memory/concurrency guard: may warn, may cancel, and always
     // caps concurrency so a huge batch cannot exhaust RAM.
-    if (!confirmBatchRun(subtasks, onlySelected)) {
+    if (!confirmBatchRun(subtasks, scope)) {
         return;
     }
 
     taskManager_.clear();
     taskManager_.setSubtasks(subtasks);
-    taskManager_.setPerformanceMode(static_cast<PerformanceMode>(perfCombo_->currentData().toInt()));
     if (!outputDirEdit_->text().trimmed().isEmpty()) {
         taskManager_.setOutputDirectory(qstringToPath(outputDirEdit_->text().trimmed()));
     } else {
@@ -1313,7 +1360,12 @@ void MainWindow::runBatch(bool onlySelected) {
     taskManager_.start();
 }
 void MainWindow::onFileStarted(const QString& fileName, int index, int total) {
-    QString pace = QString("并发 %1").arg(std::max(1, taskManager_.effectiveConcurrency()));
+    const int win = std::max(1, taskManager_.currentWindow());
+    const int planned = std::max(win, taskManager_.effectiveConcurrency());
+    QString pace = QString("并发 %1 · 自动").arg(win);
+    if (win < planned) {
+        pace += QString("（内存自适应 %1→%2）").arg(planned).arg(win);
+    }
     if (taskManager_.throttleMs() > 0) {
         pace += QString("，限速 %1ms").arg(taskManager_.throttleMs());
     }
@@ -1327,9 +1379,7 @@ void MainWindow::onFileStarted(const QString& fileName, int index, int total) {
     }
     const auto it = fileNameToRow_.constFind(baseName);
     if (it != fileNameToRow_.constEnd()) {
-        if (auto* statusItem = fileTable_->item(it.value(), 2)) {
-            statusItem->setText("处理中...");
-        }
+        setStatus(it.value(), QStringLiteral("处理中"));
     }
 }
 
@@ -1343,17 +1393,16 @@ void MainWindow::onFileFinished(const FileResult& result) {
     const auto it = fileNameToRow_.constFind(fileName);
     if (it == fileNameToRow_.constEnd()) return;
     const int row = it.value();
-    auto* pageItem = fileTable_->item(row, 1);
-    auto* statusItem = fileTable_->item(row, 2);
-    if (pageItem && result.totalPages > 0) pageItem->setText(QString::number(result.totalPages));
-    if (statusItem) {
-        if (result.success) {
-            statusItem->setText(QString("完成 [%1]").arg(QString::fromUtf8(result.watermarkText.c_str())));
-        } else {
-            statusItem->setText(QString("失败 [%1]: %2").arg(
-                QString::fromUtf8(result.watermarkText.c_str()),
-                QString::fromUtf8(result.errorMessage.c_str())));
-        }
+    if (result.totalPages > 0) setPagesAt(row, result.totalPages);
+
+    const QString wm = QString::fromUtf8(result.watermarkText.c_str());
+    if (result.success) {
+        setStatus(row, QStringLiteral("完成"),
+                  QString("完成 · 水印：%1").arg(wm));
+    } else {
+        setStatus(row, QStringLiteral("失败"),
+                  QString("失败 · 水印：%1\n原因：%2")
+                      .arg(wm, QString::fromUtf8(result.errorMessage.c_str())));
     }
 }
 
@@ -1496,6 +1545,11 @@ void MainWindow::refreshTemplateCombo(const QString& select) {
     QString want = select.isEmpty() ? previous : select;
     int idx = want.isEmpty() ? 0 : templateCombo_->findData(want);
     if (idx < 0) idx = 0;
+    // Nothing was selected yet but templates exist: default to the first one so
+    // the app is usable immediately instead of showing an empty state.
+    if (idx == 0 && select.isEmpty() && previous.isEmpty() && templateCombo_->count() > 1) {
+        idx = 1;
+    }
     templateCombo_->setCurrentIndex(idx);
     templateCombo_->blockSignals(false);
 
@@ -1506,6 +1560,17 @@ void MainWindow::refreshTemplateCombo(const QString& select) {
     // Enablement of the template buttons depends on whether a template is
     // selected, so refresh it here as well.
     updateUiState(taskManager_.isRunning());
+}
+
+bool MainWindow::hasAnyWatermarkRow() const {
+    if (!watermarkLayout_) return false;
+    for (int i = 0; i < watermarkLayout_->count(); ++i) {
+        auto* item = watermarkLayout_->itemAt(i);
+        if (auto* row = qobject_cast<WatermarkRow*>(item->widget())) {
+            if (!row->text().trimmed().isEmpty()) return true;
+        }
+    }
+    return false;
 }
 
 bool MainWindow::isTemplateMode() const {
@@ -1522,31 +1587,32 @@ void MainWindow::onWatermarkModeChanged() {
 }
 
 void MainWindow::refreshActionLabels() {
-    if (!startAllBtn_ || !startSelectedBtn_) return;
-    int count = 0;
-    if (isTemplateMode()) {
+    if (!startAllBtn_ || !startCheckedBtn_) return;
+
+    const int files = checkedCount();
+    const bool tplMode = isTemplateMode();
+
+    startCheckedBtn_->setText(files > 0
+        ? QString("生成勾选的 PDF（%1 个）").arg(files)
+        : QString("生成勾选的 PDF"));
+    startAllBtn_->setText("生成全部 PDF");
+
+    if (tplMode) {
         const WatermarkTemplate tpl = selectedTemplate();
+        int perFile = 0;
         for (const auto& wm : tpl.watermarks) {
-            if (!wm.text.empty()) count++;
+            if (!wm.text.empty() && wm.selected) perFile++;
         }
-        startAllBtn_->setText(count > 0
-            ? QString("生成全部 PDF（每份 %1 条）").arg(count) : QString("生成全部 PDF"));
-        startSelectedBtn_->setText(count > 0
-            ? QString("生成当前 PDF（%1 条）").arg(count) : QString("生成当前 PDF"));
-        startAllBtn_->setToolTip("把所选模板套用到列表中所有 PDF 并生成");
-        startSelectedBtn_->setToolTip("把所选模板套用到当前 PDF 并生成");
+        startCheckedBtn_->setToolTip(QString(
+            "把模板「%1」套用到左侧勾选的 %2 个 PDF 并生成（每份 %3 条水印）")
+            .arg(tpl.isValid() ? QString::fromUtf8(tpl.name.c_str()) : QStringLiteral("未选择"))
+            .arg(files)
+            .arg(perFile));
+        startAllBtn_->setToolTip("把所选模板套用到列表中的所有 PDF 并生成");
     } else {
-        auto it = fileWatermarkConfigs_.find(currentSelectedFile_);
-        if (!currentSelectedFile_.isEmpty() && it != fileWatermarkConfigs_.end()) {
-            for (const auto& cfg : it->second) {
-                if (cfg.selected && !cfg.text.empty()) count++;
-            }
-        }
-        startSelectedBtn_->setText(count > 0
-            ? QString("生成当前 PDF（%1 条勾选）").arg(count) : QString("生成当前 PDF"));
-        startAllBtn_->setText("生成全部 PDF");
-        startAllBtn_->setToolTip("忽略勾选，生成列表中所有 PDF 的所有水印");
-        startSelectedBtn_->setToolTip("生成当前 PDF 中已勾选的水印");
+        startCheckedBtn_->setToolTip(QString(
+            "只生成左侧勾选的 %1 个 PDF（每个文件只生成它自己勾选的水印）").arg(files));
+        startAllBtn_->setToolTip("生成列表中的所有 PDF（各自只生成已勾选的水印）");
     }
 }
 
@@ -1557,7 +1623,9 @@ void MainWindow::refreshScopeLabel() {
         const bool noFile = currentSelectedFile_.isEmpty();
         customHintLabel_->setVisible(noFile);
         if (noFile) {
-            customHintLabel_->setText("请先在左侧选择一个 PDF 文件，再为它编辑水印文字与样式。");
+            customHintLabel_->setText(
+                "未选择 PDF：这里编辑的是全局草稿，可直接「存为模板」；"
+                "选中某个 PDF 后，编辑的就是那个文件专属的水印。");
         }
     } else {
         customHintLabel_->setVisible(false);
@@ -1572,8 +1640,8 @@ void MainWindow::refreshScopeLabel() {
             ? "color:#666666; font-size:12px;"
             : "color:#b26a00; font-size:12px; font-weight:bold;");
     } else if (currentSelectedFile_.isEmpty()) {
-        scopeLabel_->setText("作用域：当前 PDF · 未选择文件");
-        scopeLabel_->setStyleSheet("color:#b26a00; font-size:12px; font-weight:bold;");
+        scopeLabel_->setText("作用域：全局草稿（未选择 PDF）");
+        scopeLabel_->setStyleSheet("color:#0078d4; font-size:12px;");
     } else {
         scopeLabel_->setText(QString("作用域：当前 PDF · %1").arg(QFileInfo(currentSelectedFile_).fileName()));
         scopeLabel_->setStyleSheet("color:#666666; font-size:12px;");
@@ -1590,13 +1658,15 @@ WatermarkTemplate MainWindow::selectedTemplate() const {
 void MainWindow::refreshTemplatePreview() {
     if (!tplPreviewLabel_) return;
 
+    const bool anyTemplates = !templateStore_.templates().empty();
     const WatermarkTemplate tpl = selectedTemplate();
-    if (gotoCustomBtn_) gotoCustomBtn_->setVisible(!tpl.isValid());
+    if (gotoCustomBtn_) gotoCustomBtn_->setVisible(!anyTemplates);
     if (!tpl.isValid()) {
-        tplPreviewLabel_->setText(
-            "还没有可用模板。\n\n"
-            "模板是全局的（与具体 PDF 无关）：在「自定义」里写好水印文字与样式，"
-            "点「存为模板...」即可保存，之后在这里选用。");
+        tplPreviewLabel_->setText(anyTemplates
+            ? "请在上方选择一个水印模板。"
+            : "还没有可用模板。\n\n"
+              "模板是全局的（与具体 PDF 无关）：在「自定义」里写好水印文字与样式，"
+              "点「存为模板...」即可保存，之后在这里选用。");
         refreshScopeLabel();
         refreshActionLabels();
         return;
@@ -1627,9 +1697,7 @@ void MainWindow::refreshTemplatePreview() {
 int MainWindow::applyTemplateToAllFiles(const WatermarkTemplate& tpl) {
     int applied = 0;
     for (int r = 0; r < fileTable_->rowCount(); ++r) {
-        QTableWidgetItem* item = fileTable_->item(r, 3);
-        if (!item) continue;
-        const QString path = item->text();
+        const QString path = pathAt(r);
         if (path.isEmpty()) continue;
         applyTemplateToFile(tpl, path);
         ++applied;
@@ -1659,14 +1727,13 @@ WatermarkTemplate MainWindow::currentUiAsTemplate(const QString& name) const {
 }
 
 void MainWindow::applyTemplateToFile(const WatermarkTemplate& tpl, const QString& filePath) {
-    if (filePath.isEmpty()) return;
+    // An empty filePath means the global draft (no PDF selected).
     fileWatermarkConfigs_[filePath] = templateToConfigs(tpl);
     perPdfConfigMap_[filePath] = tpl.style();
 }
 
 void MainWindow::applyTemplateToCurrentUi(const WatermarkTemplate& tpl) {
-    if (currentSelectedFile_.isEmpty()) return;
-    applyTemplateToFile(tpl, currentSelectedFile_);
+    applyTemplateToFile(tpl, currentSelectedFile_);   // "" = draft
     loadWatermarksForSelectedFile();
     updateUiState(taskManager_.isRunning());
 }
@@ -1677,41 +1744,44 @@ void MainWindow::loadTemplateByName(const QString& name) {
         refreshTemplateCombo();
         return;
     }
-    if (currentSelectedFile_.isEmpty()) {
-        QMessageBox::warning(this, "提示", "请先在左侧列表选择一个 PDF 文件。");
-        return;
-    }
     applyTemplateToCurrentUi(*tpl);
-    statusLabel_->setText(QString("已把模板「%1」载入当前 PDF 的编辑区，可继续微调。").arg(name));
+    statusLabel_->setText(currentSelectedFile_.isEmpty()
+        ? QString("已把模板「%1」载入草稿编辑区（未选择 PDF）。").arg(name)
+        : QString("已把模板「%1」载入当前 PDF 的编辑区，可继续微调。").arg(name));
 }
 
 void MainWindow::onSaveAsTemplate() {
-    if (currentSelectedFile_.isEmpty()) {
-        QMessageBox::warning(this, "提示",
-            "请先在左侧选择一个 PDF 文件，并在「自定义模式」中编辑要保存的水印文字。");
-        return;
-    }
-    bool ok = false;
-    const QString name = QInputDialog::getText(this, "保存为水印模板",
-        "模板名称：", QLineEdit::Normal, QString(), &ok).trimmed();
-    if (!ok || name.isEmpty()) return;
-
-    WatermarkTemplate tpl = currentUiAsTemplate(name);
+    // No name prompt: the name is derived from the watermark text. Works with
+    // or without a selected PDF (no file => the global draft is saved).
+    WatermarkTemplate tpl = currentUiAsTemplate(QString());
     if (!tpl.isValid()) {
-        QMessageBox::warning(this, "提示", "请至少填写一个水印文字后再保存为模板。");
+        QMessageBox::warning(this, "提示",
+            "请先添加至少一个水印文字，再保存为模板。");
         return;
     }
+
+    const QString name = QString::fromUtf8(templateNameFromConfigs(tpl.watermarks).c_str());
+    if (name.isEmpty()) {
+        QMessageBox::warning(this, "提示", "水印文字为空，无法生成模板名称。");
+        return;
+    }
+    tpl.name = name.toUtf8().toStdString();
+
     if (templateStore_.find(name)) {
         if (QMessageBox::question(this, "覆盖模板",
-                QString("模板「%1」已存在，是否覆盖？").arg(name)) != QMessageBox::Yes) {
+                QString("已存在同名模板「%1」（按水印文字自动命名），是否覆盖？").arg(name))
+                != QMessageBox::Yes) {
             return;
         }
     }
+
     templateStore_.addOrReplace(tpl);
     templateStore_.save();
     refreshTemplateCombo(name);
     updateUiState(taskManager_.isRunning());
-    statusLabel_->setText(QString("模板「%1」已保存（全局模板，可在「模板模式」中套用）。").arg(name));
+    statusLabel_->setText(currentSelectedFile_.isEmpty()
+        ? QString("模板「%1」已保存（名称取自水印文字）。").arg(name)
+        : QString("模板「%1」已保存（名称取自水印文字，全局模板）。").arg(name));
 }
 
 void MainWindow::onManageTemplates() {
