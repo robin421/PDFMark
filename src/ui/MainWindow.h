@@ -141,7 +141,7 @@ private:
     bool confirmBatchRun(const std::vector<TaskManager::FileSubtask>& subtasks,
                          BatchScope scope);
 
-    // Dynamic button copy: "生成当前 PDF（3 条）" etc. depends on mode + config.
+    // Dynamic button copy, e.g. "生成勾选的 PDF（3 个）", depends on mode + checked files.
     void refreshActionLabels();
     // Scope banner: which PDFs / which template the right panel currently edits.
     void refreshScopeLabel();
