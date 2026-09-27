@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(PDFMark VERSION 1.1.7 LANGUAGES CXX C)
+project(PDFMark VERSION 1.2.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -83,12 +83,18 @@ add_library(pdfmark_core STATIC
     src/pdf/PdfWriter.h
     src/pdf/PdfWriter.cpp
     src/watermark/WatermarkConfig.h
+    src/watermark/WatermarkTemplate.h
+    src/watermark/WatermarkTemplateStore.h
+    src/watermark/WatermarkTemplateStore.cpp
+    src/watermark/WatermarkSelection.h
     src/watermark/WatermarkTileLayout.h
     src/watermark/WatermarkTileLayout.cpp
     src/watermark/WatermarkRenderer.h
     src/watermark/WatermarkRenderer.cpp
     src/task/TaskManager.h
     src/task/TaskManager.cpp
+    src/task/WorkloadEstimate.h
+    src/task/WorkloadEstimate.cpp
     src/task/WorkerPool.h
     src/task/WorkerPool.cpp
     src/diagnostics/Diagnostics.h
@@ -144,6 +150,7 @@ set(APP_SRCS
     main.cpp
     src/ui/MainWindow.h
     src/ui/MainWindow.cpp
+    src/ui/FileTableSelection.h
     src/ui/PasswordDialog.h
     src/ui/PasswordDialog.cpp
     ${APP_RESOURCES_QRC}
@@ -213,6 +220,9 @@ elseif(WIN32)
     )
 endif()
 
-# Tests
-enable_testing()
-add_subdirectory(tests)
+# Tests (CI release jobs pass -DBUILD_TESTS=OFF to skip building them)
+option(BUILD_TESTS "Build unit and visual tests" ON)
+if(BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()

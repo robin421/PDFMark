@@ -53,12 +53,16 @@ PdfDocumentRef PdfDocument::open(const fs::path& path, const std::string& passwo
     // FPDF_LoadMemDocument does NOT copy the buffer.  The buffer inside
     // payload must remain valid and unmodified for the entire lifetime of the
     // document handle.
-    FPDF_DOCUMENT doc = FPDF_LoadMemDocument(payload->buffer.data(),
-                                              static_cast<int>(payload->buffer.size()),
-                                              password.empty() ? nullptr : password.c_str());
-    if (!doc) {
-        unsigned long err = FPDF_GetLastError();
-        throw PdfError("Failed to parse PDF: " + pathToString(path) + " (" + pdfiumError(err) + ")");
+    FPDF_DOCUMENT doc = nullptr;
+    {
+        PdfiumCallLock lock(PdfLibrary::callMutex());
+        doc = FPDF_LoadMemDocument(payload->buffer.data(),
+                                   static_cast<int>(payload->buffer.size()),
+                                   password.empty() ? nullptr : password.c_str());
+        if (!doc) {
+            unsigned long err = FPDF_GetLastError();
+            throw PdfError("Failed to parse PDF: " + pathToString(path) + " (" + pdfiumError(err) + ")");
+        }
     }
 
     return {PdfDocumentHandle(doc), payload};
@@ -67,20 +71,26 @@ PdfDocumentRef PdfDocument::open(const fs::path& path, const std::string& passwo
 PdfDocumentHandle PdfDocument::create() {
     PdfLibrary::initialize();
 
-    FPDF_DOCUMENT doc = FPDF_CreateNewDocument();
-    if (!doc) {
-        throw PdfError("Failed to create new PDF document");
+    FPDF_DOCUMENT doc = nullptr;
+    {
+        PdfiumCallLock lock(PdfLibrary::callMutex());
+        doc = FPDF_CreateNewDocument();
+        if (!doc) {
+            throw PdfError("Failed to create new PDF document");
+        }
     }
     return PdfDocumentHandle(doc);
 }
 
 int PdfDocument::pageCount(FPDF_DOCUMENT doc) {
     if (!doc) return 0;
+    PdfiumCallLock lock(PdfLibrary::callMutex());
     return FPDF_GetPageCount(doc);
 }
 
 PdfPageHandle PdfDocument::loadPage(FPDF_DOCUMENT doc, int index) {
     if (!doc) throw PdfError("Null document");
+    PdfiumCallLock lock(PdfLibrary::callMutex());
     if (index < 0 || index >= FPDF_GetPageCount(doc)) {
         throw PdfError("Page index out of range: " + std::to_string(index));
     }
@@ -93,11 +103,13 @@ PdfPageHandle PdfDocument::loadPage(FPDF_DOCUMENT doc, int index) {
 
 double PdfDocument::getPageWidth(FPDF_PAGE page) {
     if (!page) return 0.0;
+    PdfiumCallLock lock(PdfLibrary::callMutex());
     return FPDF_GetPageWidth(page);
 }
 
 double PdfDocument::getPageHeight(FPDF_PAGE page) {
     if (!page) return 0.0;
+    PdfiumCallLock lock(PdfLibrary::callMutex());
     return FPDF_GetPageHeight(page);
 }
 
@@ -135,7 +147,11 @@ void PdfDocument::save(FPDF_DOCUMENT doc, const fs::path& path) {
         throw PdfError("Failed to open output file: " + fw.path);
     }
 
-    FPDF_BOOL ok = FPDF_SaveAsCopy(doc, &fw, FPDF_NO_INCREMENTAL);
+    FPDF_BOOL ok = 0;
+    {
+        PdfiumCallLock lock(PdfLibrary::callMutex());
+        ok = FPDF_SaveAsCopy(doc, &fw, FPDF_NO_INCREMENTAL);
+    }
 
     std::fclose(fw.file);
 

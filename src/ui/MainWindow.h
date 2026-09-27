@@ -3,7 +3,10 @@
 
 #include "common/Common.h"
 #include "watermark/WatermarkConfig.h"
+#include "watermark/WatermarkTemplate.h"
+#include "watermark/WatermarkTemplateStore.h"
 #include "task/TaskManager.h"
+#include "task/WorkloadEstimate.h"
 #include <QMainWindow>
 #include <QTableWidget>
 #include <QScrollArea>
@@ -20,6 +23,7 @@
 #include <QFontComboBox>
 #include <QDoubleSpinBox>
 #include <QCheckBox>
+#include <QHash>
 
 namespace pdfmark {
 
@@ -31,15 +35,19 @@ public:
 
     QString text() const;
     void setText(const QString& t);
+    bool isSelected() const;
+    void setSelected(bool on);
     int index() const { return index_; }
 
 signals:
     void textChanged();
+    void selectionChanged();
     void removeRequested(int index);
 
 private:
     QLineEdit* lineEdit_ = nullptr;
     QPushButton* removeBtn_ = nullptr;
+    QCheckBox* checkBox_ = nullptr;
     int index_ = -1;
 };
 
@@ -79,9 +87,18 @@ protected:
     void addWatermarkRow();
     void removeWatermarkRow(int index);
     void onWatermarkTextChanged();
+    void onWatermarkSelectionChanged();
     void onPreviewWatermark();
 
-    // Watermark row management
+    // Watermark templates
+    void refreshTemplateCombo(const QString& select = QString());
+    void onApplyTemplateToCurrent();
+    void onApplyTemplateToAll();
+    void onSaveAsTemplate();
+    void onManageTemplates();
+    WatermarkTemplate currentUiAsTemplate(const QString& name) const;
+    void applyTemplateToFile(const WatermarkTemplate& tpl, const QString& filePath);
+    void applyTemplateToCurrentUi(const WatermarkTemplate& tpl);
 
     // Auto-update
     void onCheckForUpdates();
@@ -91,6 +108,10 @@ private:
     void setupUi();
     void setupConnections();
     WatermarkConfig currentConfig() const;
+    // Centralised style <-> UI mapping so templates, per-file configs and the
+    // live controls can never drift apart.
+    WatermarkConfig styleFromUi() const;
+    void applyStyleToUi(const WatermarkConfig& style);
     void updateUiState(bool running);
 
     // Per-PDF watermark management
@@ -100,11 +121,26 @@ private:
     std::vector<TaskManager::FileSubtask> buildAllConfigs(bool onlySelected = false);
     void runBatch(bool onlySelected);
 
+    // Pre-flight memory / concurrency guard. Returns false when the user
+    // cancels, otherwise applies the chosen concurrency to taskManager_.
+    bool preflightAllowsRun(const std::vector<TaskManager::FileSubtask>& subtasks);
+    WorkloadEstimate estimateCurrentWorkload(
+        const std::vector<TaskManager::FileSubtask>& subtasks) const;
+    // Rebuild the filename -> row lookup used by the progress handlers
+    // (keeps them O(1) instead of scanning the whole table per signal).
+    void rebuildFileIndex();
+
     // Widgets
     QTableWidget* fileTable_ = nullptr;
     QPushButton* openFolderBtn_ = nullptr;
     QString lastOutputDir_;
     // Watermark panel
+    // Watermark template controls
+    QComboBox* templateCombo_ = nullptr;
+    QPushButton* applyTemplateBtn_ = nullptr;
+    QPushButton* applyTemplateAllBtn_ = nullptr;
+    QPushButton* saveTemplateBtn_ = nullptr;
+    QPushButton* manageTemplateBtn_ = nullptr;
     QScrollArea* watermarkScrollArea_ = nullptr;
     QWidget* watermarkContainer_ = nullptr;   // holds rows in a QVBoxLayout
     QVBoxLayout* watermarkLayout_ = nullptr; // owns WatermarkRow widgets
@@ -138,6 +174,9 @@ private:
     QString currentSelectedFile_;  // currently displayed PDF path
 
     int nextWatermarkIndex_ = 0;  // monotonic index for WatermarkRow identity
+    QHash<QString, int> fileNameToRow_;  // basename -> file table row
+    bool preflightSuppressed_ = false;   // "don't warn again this session"
+    WatermarkTemplateStore templateStore_;
     AutoUpdater* autoUpdater_ = nullptr;
 };
 

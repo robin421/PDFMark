@@ -18,6 +18,10 @@ struct WatermarkConfig {
     int dpi = 200;                    // Rasterization DPI (150, 200, 300)
     int jpegQuality = 85;              // Output JPEG quality (1-100)
 
+    // UI batch-selection flag: "生成所选" only generates watermarks with
+    // selected == true. Ignored by the rendering pipeline and TaskManager.
+    bool selected = true;
+
     // Validate parameters to prevent zero division or rendering bugs
     bool isValid() const {
         if (text.empty()) return false;

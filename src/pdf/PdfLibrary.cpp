@@ -9,6 +9,11 @@ std::mutex PdfLibrary::s_mutex;
 bool PdfLibrary::s_initialized = false;
 int PdfLibrary::s_refCount = 0;
 
+std::recursive_mutex& PdfLibrary::callMutex() {
+    static std::recursive_mutex m;
+    return m;
+}
+
 void PdfLibrary::initialize() {
     std::lock_guard<std::mutex> lock(s_mutex);
     if (s_refCount == 0 && !s_initialized) {

@@ -6,9 +6,14 @@ add_executable(pdfmark_tests
     WatermarkTileLayoutTest.cpp
     WatermarkVisualTest.cpp
     WatermarkConfigTest.cpp
+    WatermarkSelectionTest.cpp
     MemoryModelTest.cpp
     CommonTest.cpp
     MultiWatermarkBatchTest.cpp
+    FileRemovalTest.cpp
+    WatermarkTemplateTest.cpp
+    WorkloadEstimateTest.cpp
+    ConcurrencyBudgetTest.cpp
 )
 
 target_link_libraries(pdfmark_tests PRIVATE
@@ -29,6 +34,9 @@ add_test(NAME WatermarkVisualTest COMMAND pdfmark_tests --test WatermarkVisual)
 
 # Config validation test
 add_test(NAME WatermarkConfigTest COMMAND pdfmark_tests --test WatermarkConfig)
+
+# Per-watermark selection filter test
+add_test(NAME WatermarkSelectionTest COMMAND pdfmark_tests --test WatermarkSelection)
 
 # Memory model test
 add_test(NAME MemoryModelTest COMMAND pdfmark_tests --test MemoryModel)
@@ -52,6 +60,15 @@ elseif(WIN32)
 endif()
 # Common types test
 add_test(NAME CommonTest COMMAND pdfmark_tests --test Common)
+
+# Reusable watermark template + JSON store test
+add_test(NAME WatermarkTemplateTest COMMAND pdfmark_tests --test WatermarkTemplate)
+
+# Pre-flight workload / memory budget estimator (pure functions)
+add_test(NAME WorkloadEstimateTest COMMAND pdfmark_tests --test WorkloadEstimate)
+
+# Batch concurrency must never exceed the configured window
+add_test(NAME ConcurrencyBudgetTest COMMAND pdfmark_tests --test ConcurrencyBudget)
 # Multi-watermark batch test
 
 # AutoUpdater test
@@ -69,3 +86,6 @@ if(MSVC)
 endif()
 add_test(NAME AutoUpdaterTest COMMAND pdfmark_updater_test)
 add_test(NAME MultiWatermarkBatchTest COMMAND pdfmark_tests --test MultiWatermarkBatch)
+
+# Selected-file removal regression test (over-deletion bug)
+add_test(NAME FileRemovalTest COMMAND pdfmark_tests --test FileRemoval)

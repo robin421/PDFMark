@@ -71,6 +71,31 @@ long long MemoryProbe::currentPhysicalBytes() {
 #endif
 }
 
+long long MemoryProbe::totalPhysicalBytes() {
+#ifdef _WIN32
+    MEMORYSTATUSEX status;
+    status.dwLength = sizeof(status);
+    if (GlobalMemoryStatusEx(&status)) {
+        return static_cast<long long>(status.ullTotalPhys);
+    }
+    return 0;
+#elif defined(__APPLE__)
+    uint64_t mem = 0;
+    size_t len = sizeof(mem);
+    if (sysctlbyname("hw.memsize", &mem, &len, nullptr, 0) == 0) {
+        return static_cast<long long>(mem);
+    }
+    return 0;
+#else
+    long pages = sysconf(_SC_PHYS_PAGES);
+    long pageSize = sysconf(_SC_PAGE_SIZE);
+    if (pages > 0 && pageSize > 0) {
+        return static_cast<long long>(pages) * static_cast<long long>(pageSize);
+    }
+    return 0;
+#endif
+}
+
 static std::string formatBytes(long long bytes) {
     if (bytes <= 0) return "0 B";
     constexpr long long KB = 1024;

@@ -5,6 +5,10 @@
 namespace pdfmark {
 
 int WorkerPool::idealWorkerCount(PerformanceMode mode) {
+    // NOTE: PDFium is not thread-safe (see third_party/pdfium/include/fpdfview.h
+    // and PdfLibrary::callMutex()); every PDFium call is serialised. Concurrency
+    // therefore only overlaps the Qt-side work (watermark painting, JPEG
+    // encoding, disk I/O) and bounds how many documents are open at once.
     int logicalCores = QThread::idealThreadCount();
     if (logicalCores <= 0) logicalCores = 4;
 
@@ -12,19 +16,22 @@ int WorkerPool::idealWorkerCount(PerformanceMode mode) {
         case PerformanceMode::Low:
             return 1;
         case PerformanceMode::Normal:
-            // Standard balance: 2 to 4 workers, leaves cores free for UI and disk I/O
-            return std::clamp(logicalCores / 2, 2, 4);
+            // Two documents in flight: one holds the (serialised) PDFium lock
+            // while the other does Qt-side work (watermark paint, JPEG encode).
+            return 2;
         case PerformanceMode::High:
-            // High throughput: leave 1 core for OS/UI, max 8 to prevent RAM exhaustion
-            return std::clamp(logicalCores - 1, 2, 8);
+            // PDFium itself is serialised by PdfLibrary::callMutex(), so extra
+            // workers only overlap the Qt-side work and each holds a whole
+            // source + output document in RAM. 4 is the practical ceiling.
+            return std::clamp(logicalCores / 2, 2, 4);
     }
     return 2;
 }
 
-QThreadPool* WorkerPool::poolForMode(PerformanceMode mode) {
-    QThreadPool* pool = QThreadPool::globalInstance();
-    pool->setMaxThreadCount(idealWorkerCount(mode));
-    return pool;
+int WorkerPool::idealWorkerCountFor(PerformanceMode mode, int memoryBudgetDocs) {
+    const int cpuBased = idealWorkerCount(mode);
+    if (memoryBudgetDocs <= 0) return cpuBased;
+    return (std::max)(1, (std::min)(cpuBased, memoryBudgetDocs));
 }
 
 } // namespace pdfmark

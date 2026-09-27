@@ -1,4 +1,4 @@
-#include <QGuiApplication>
+#include <QApplication>
 #include <iostream>
 #include <string>
 #include <cstring>
@@ -7,16 +7,21 @@
 namespace pdfmark {
     void testCommonUtilities();
     void testWatermarkConfig();
+    void testWatermarkSelection();
     void testTileLayout();
     void testWatermarkVisual(const std::filesystem::path& outputDir);
     void testMemoryModel();
     void testMultiWatermarkBatch();
+    void testFileRemoval();
+    void testWatermarkTemplate();
+    void testWorkloadEstimate();
+    void testConcurrencyBudget();
 }
 
 int main(int argc, char* argv[]) {
     // Set offscreen QPA platform for headless execution
     qputenv("QT_QPA_PLATFORM", "offscreen");
-    QGuiApplication app(argc, argv);
+    QApplication app(argc, argv);
     std::string testName = "ALL";
     for (int i = 1; i < argc; ++i) {
         if ((std::strcmp(argv[i], "--test") == 0 || std::strcmp(argv[i], "-t") == 0) && i + 1 < argc) {
@@ -34,6 +39,9 @@ int main(int argc, char* argv[]) {
         if (testName == "ALL" || testName == "WatermarkConfig") {
             pdfmark::testWatermarkConfig();
         }
+        if (testName == "ALL" || testName == "WatermarkSelection") {
+            pdfmark::testWatermarkSelection();
+        }
         if (testName == "ALL" || testName == "TileLayout") {
             pdfmark::testTileLayout();
         }
@@ -45,6 +53,18 @@ int main(int argc, char* argv[]) {
         }
         if (testName == "ALL" || testName == "MultiWatermarkBatch") {
             pdfmark::testMultiWatermarkBatch();
+        }
+        if (testName == "ALL" || testName == "FileRemoval") {
+            pdfmark::testFileRemoval();
+        }
+        if (testName == "ALL" || testName == "WatermarkTemplate") {
+            pdfmark::testWatermarkTemplate();
+        }
+        if (testName == "ALL" || testName == "WorkloadEstimate") {
+            pdfmark::testWorkloadEstimate();
+        }
+        if (testName == "ALL" || testName == "ConcurrencyBudget") {
+            pdfmark::testConcurrencyBudget();
         }
 
         std::cout << "\n==============================\n";

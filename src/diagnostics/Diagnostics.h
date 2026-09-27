@@ -31,6 +31,9 @@ class MemoryProbe {
 public:
     static long long peakPhysicalBytes();
     static long long currentPhysicalBytes();
+    // Total physical RAM of the machine (0 when it cannot be determined).
+    // Used by the batch memory budget so large jobs can be throttled safely.
+    static long long totalPhysicalBytes();
 };
 
 struct DiagnosticsReport {

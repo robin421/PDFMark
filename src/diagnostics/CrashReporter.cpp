@@ -1,5 +1,6 @@
 // PDFMark - Crash reporting implementation for GlitchTip.
 #include "diagnostics/CrashReporter.h"
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -12,6 +13,7 @@
 #include <QNetworkRequest>
 #include <QStandardPaths>
 #include <QSysInfo>
+#include <QThread>
 #include <QUuid>
 #include <QDebug>
 
@@ -185,6 +187,17 @@ void CrashReporter::sendReportAsync(const QString& exceptionType,
                                     const QString& extraInfo,
                                     const QString& logTail,
                                     std::function<void(bool success)> callback) {
+    // QNetworkAccessManager needs a thread with a running event loop. Worker
+    // pool threads have none, so hop back to the application (GUI) thread
+    // instead of creating a manager that can never deliver its reply.
+    QCoreApplication* app = QCoreApplication::instance();
+    if (app && QThread::currentThread() != app->thread()) {
+        QMetaObject::invokeMethod(app, [=]() {
+            sendReportAsync(exceptionType, exceptionValue, moduleName, extraInfo, logTail, callback);
+        }, Qt::QueuedConnection);
+        return;
+    }
+
     QByteArray payload = buildEventJson(QString(), exceptionType, exceptionValue, moduleName, extraInfo, logTail);
 
     auto* manager = new QNetworkAccessManager();

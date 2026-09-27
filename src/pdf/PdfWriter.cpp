@@ -1,6 +1,7 @@
 // PDFMark - PdfWriter implementation: inserts full-page raster images as JPEG.
 #include "pdf/PdfWriter.h"
 #include "pdf/PdfDocument.h"
+#include "pdf/PdfLibrary.h"
 #include "common/Common.h"
 #include <fpdfview.h>
 #include <fpdf_edit.h>
@@ -32,6 +33,10 @@ void PdfWriter::appendRasterPage(FPDF_DOCUMENT doc,
     if (image.isNull()) throw PdfError("Null image");
     if (widthPt <= 0 || heightPt <= 0) throw PdfError("Invalid page dimensions");
     if (jpegQuality < 10 || jpegQuality > 100) jpegQuality = 85;
+
+    // PDFium is not thread-safe: hold the global call lock around every PDFium
+    // object/stream operation below (the QImage JPEG encoding stays parallel).
+    PdfiumCallLock pdfiumLock(PdfLibrary::callMutex());
 
     int pageIndex = FPDF_GetPageCount(doc);
     FPDF_PAGE page = FPDFPage_New(doc, pageIndex, widthPt, heightPt);

@@ -13,10 +13,10 @@
 #include <vector>
 #include <QString>
 #include <QMetaType>
-#define PDFMARK_VERSION "1.1.7"
+#define PDFMARK_VERSION "1.2.0"
 #define PDFMARK_VERSION_MAJOR 1
-#define PDFMARK_VERSION_MINOR 1
-#define PDFMARK_VERSION_PATCH 7
+#define PDFMARK_VERSION_MINOR 2
+#define PDFMARK_VERSION_PATCH 0
 
 namespace pdfmark {
 

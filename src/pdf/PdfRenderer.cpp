@@ -14,6 +14,10 @@ namespace pdfmark {
 QImage PdfRenderer::rasterizePage(FPDF_PAGE page, int dpi) {
     if (!page) throw PdfError("Null page handle");
 
+    // PDFium is not thread-safe (see third_party/pdfium/include/fpdfview.h):
+    // hold the global call lock for the whole rasterization.
+    PdfiumCallLock pdfiumLock(PdfLibrary::callMutex());
+
     double widthPt = 0, heightPt = 0;
     try {
         widthPt = PdfDocument::getPageWidth(page);

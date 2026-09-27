@@ -12,6 +12,7 @@
 #include <QTimer>
 #include <QRunnable>
 #include <iostream>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <unordered_set>
@@ -39,14 +40,17 @@ static uint64_t getUniqueTempId() {
 }
 
 TaskManager::TaskManager(QObject* parent)
-    : QObject(parent),
-      pool_(QThreadPool::globalInstance()) {
+    : QObject(parent) {
+    // Own the pool: setting maxThreadCount on the global instance would affect
+    // unrelated Qt users, and we must be able to drain it deterministically.
+    pool_ = new QThreadPool(this);
+    pool_->setMaxThreadCount(WorkerPool::idealWorkerCount(PerformanceMode::Normal));
     qRegisterMetaType<FileResult>("FileResult");
     qRegisterMetaType<std::vector<FileResult>>("std::vector<FileResult>");
 }
 
 TaskManager::~TaskManager() {
-    cancel();
+    shutdown();
 }
 
 void TaskManager::setWatermarkConfig(const WatermarkConfig& config) {
@@ -75,6 +79,36 @@ void TaskManager::setPerformanceMode(PerformanceMode mode) {
     std::lock_guard<std::mutex> lock(mutex_);
     perfMode_ = mode;
     pool_->setMaxThreadCount(WorkerPool::idealWorkerCount(mode));
+}
+
+void TaskManager::setMaxConcurrentDocuments(int count) {
+    maxConcurrentDocs_.store(count > 0 ? count : 0);
+}
+
+void TaskManager::setThrottleMs(int ms) {
+    throttleMs_.store(ms > 0 ? ms : 0);
+}
+
+void TaskManager::shutdown() {
+    shuttingDown_.store(true);
+    cancelRequested_.store(true);
+    {
+        auto sync = sync_;
+        if (sync) {
+            std::lock_guard<std::mutex> lk(sync->mtx);
+            sync->cv.notify_all();
+        }
+    }
+    if (supervisorThread_) {
+        supervisorThread_->wait();
+        delete supervisorThread_;
+        supervisorThread_ = nullptr;
+    }
+    if (pool_) {
+        pool_->waitForDone();
+    }
+    sync_.reset();
+    running_.store(false);
 }
 
 void TaskManager::setOutputDirectory(const fs::path& dir) {
@@ -180,113 +214,6 @@ fs::path TaskManager::outputPathFor(const fs::path& input,
     }
     // 否则放置在源 PDF 所在目录下
     return input.parent_path() / stringToPath(subdir) / stringToPath(filename);
-}
-
-FileResult TaskManager::processSingleFile(const fs::path& input,
-                                         const fs::path& output,
-                                         const WatermarkConfig& config,
-                                         std::function<void(int,int)> pageCallback) {
-    FileResult result;
-    result.inputPath = input;
-    result.outputPath = output;
-    result.watermarkText = config.text;
-    double elapsed = 0.0;
-    ScopedTimer timer(elapsed);
-
-    // Unique temp file to avoid collisions with concurrent tasks or file locks
-    uint64_t uid = getUniqueTempId();
-    fs::path tempOutput = output.parent_path() / stringToPath(
-        "~" + pathToString(output.filename()) + "." + std::to_string(uid) + ".tmp");
-
-    std::string password;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = passwords_.find(pathToString(input));
-        if (it != passwords_.end()) password = it->second;
-    }
-
-    try {
-        // Ensure target subdirectory exists safely
-        std::error_code ecMkdir;
-        fs::create_directories(output.parent_path(), ecMkdir);
-        if (ecMkdir && !fs::exists(output.parent_path())) {
-            throw PdfError("Cannot create output directory: " + ecMkdir.message());
-        }
-
-        PdfDocumentRef srcDocRef = PdfDocument::open(input, password);
-        FPDF_DOCUMENT srcDoc = srcDocRef.first.get();
-        int totalPages = PdfDocument::pageCount(srcDoc);
-        result.totalPages = totalPages;
-
-        if (totalPages <= 0) {
-            throw PdfError("PDF has no pages: " + pathToString(input));
-        }
-        PdfDocumentHandle dstDoc = PdfDocument::create();
-
-        for (int i = 0; i < totalPages; ++i) {
-            if (cancelRequested_.load()) {
-                throw PdfError("Operation cancelled by user");
-            }
-
-            PdfPageHandle srcPage = PdfDocument::loadPage(srcDoc, i);
-            double widthPt = PdfDocument::getPageWidth(srcPage.get());
-            double heightPt = PdfDocument::getPageHeight(srcPage.get());
-
-            QImage image = PdfRenderer::rasterizePage(srcPage.get(), config.dpi);
-            WatermarkRenderer::applyWatermark(image, config);
-            PdfWriter::appendRasterPage(dstDoc.get(), image, widthPt, heightPt, config.jpegQuality);
-
-            if (pageCallback) {
-                pageCallback(i + 1, totalPages);
-            }
-        }
-
-        // Write to temp file first
-        PdfDocument::save(dstDoc.get(), tempOutput);
-
-        // Atomic rename to final destination
-        std::error_code ecRename;
-        fs::rename(tempOutput, output, ecRename);
-        if (ecRename) {
-            std::error_code ecCopy;
-            fs::copy_file(tempOutput, output, fs::copy_options::overwrite_existing, ecCopy);
-            if (ecCopy) {
-                std::error_code ecRm;
-                fs::remove(tempOutput, ecRm);
-                throw PdfError("Failed to save output file: rename (" + ecRename.message() +
-                               "), copy (" + ecCopy.message() + ")");
-            }
-            std::error_code ecRm;
-            fs::remove(tempOutput, ecRm);
-        }
-
-        result.success = true;
-    } catch (const std::exception& e) {
-        result.success = false;
-        result.errorMessage = e.what();
-        std::error_code ec;
-        fs::remove(tempOutput, ec);
-
-        // Report task error asynchronously to GlitchTip for remote monitoring
-        QString extra = QString("Input: %1\nOutput: %2\nWatermark: %3")
-            .arg(QString::fromUtf8(pathToString(input).c_str()))
-            .arg(QString::fromUtf8(pathToString(output).c_str()))
-            .arg(QString::fromUtf8(config.text.c_str()));
-        CrashReporter::sendReportAsync("TaskError", e.what(), "TaskManager::processSingleFile", extra, "");
-        qCritical() << "Task error on" << QString::fromUtf8(pathToString(input.filename()).c_str())
-                    << ":" << e.what();
-    } catch (...) {
-        result.success = false;
-        result.errorMessage = "Unknown critical error occurred during processing";
-        std::error_code ec;
-        fs::remove(tempOutput, ec);
-
-        CrashReporter::sendReportAsync("TaskUnknownError", "Unknown exception", "TaskManager::processSingleFile", "", "");
-        qCritical() << "Unknown task error on" << QString::fromUtf8(pathToString(input.filename()).c_str());
-    }
-
-    result.elapsedMs = elapsed;
-    return result;
 }
 
 void TaskManager::processDocumentBatch(const DocumentBatchJob& docJob,
@@ -574,72 +501,109 @@ void TaskManager::start() {
     auto completedUnits = std::make_shared<std::atomic<int>>(0);
     auto lastReportedPct = std::make_shared<std::atomic<int>>(0);
 
-    int maxWorkers = WorkerPool::idealWorkerCount(perfMode_);
+    const int maxWorkers = WorkerPool::idealWorkerCount(perfMode_);
     pool_->setMaxThreadCount(maxWorkers);
 
-    QThread* supervisorThread = QThread::create([this, docJobs, totalSubtasks, completedUnits, totalUnits, lastReportedPct]() {
-        struct SyncState {
-            std::mutex mtx;
-            std::condition_variable cv;
-            int remaining = 0;
-        };
-        auto sync = std::make_shared<SyncState>();
-        sync->remaining = static_cast<int>(docJobs.size());
+    // Bounded sliding window: never keep more than `window` source documents in
+    // flight. Peak memory therefore depends on `window`, not on how many files
+    // the user queued. `window` is derived from the RAM budget by the UI.
+    const int requested = maxConcurrentDocs_.load();
+    int window = requested > 0 ? requested : maxWorkers;
+    window = std::clamp(window, 1, (std::max)(1, maxWorkers));
+    effectiveConcurrency_.store(window);
+    inFlightDocs_.store(0);
+    peakInFlightDocs_.store(0);
 
-        for (const auto& dj : docJobs) {
-            if (cancelRequested_.load()) {
-                for (const auto& task : dj.tasks) {
-                    FileResult res;
-                    res.inputPath = task.input;
-                    res.outputPath = task.output;
-                    res.watermarkText = task.config.text;
-                    res.success = false;
-                    res.errorMessage = "Operation cancelled";
-                    {
-                        std::lock_guard<std::mutex> lk(mutex_);
-                        results_[task.subtaskIndex] = res;
+    const int throttle = throttleMs_.load();
+    const size_t jobCount = docJobs.size();
+
+    sync_ = std::make_shared<BatchSyncState>();
+    auto sync = sync_;
+
+    supervisorThread_ = QThread::create(
+        [this, docJobs, totalSubtasks, completedUnits, totalUnits, lastReportedPct,
+         sync, window, throttle, jobCount]() {
+            size_t next = 0;
+            {
+                std::unique_lock<std::mutex> lk(sync->mtx);
+
+                // Dispatch loop: submit one document at a time, but never let
+                // more than `window` run concurrently. When a document
+                // finishes it signals the condition variable and we top up.
+                while (next < jobCount) {
+                    sync->cv.wait(lk, [&]() {
+                        return sync->inFlight < window || cancelRequested_.load();
+                    });
+                    if (cancelRequested_.load()) break;
+
+                    const DocumentBatchJob& dj = docJobs[next++];
+                    sync->inFlight++;
+                    lk.unlock();
+
+                    pool_->start(QRunnable::create(
+                        [this, dj, totalSubtasks, completedUnits, totalUnits, lastReportedPct, sync]() {
+                            const int cur = inFlightDocs_.fetch_add(1) + 1;
+                            int prev = peakInFlightDocs_.load();
+                            while (cur > prev && !peakInFlightDocs_.compare_exchange_weak(prev, cur)) {
+                                // lock-free monotonic peak update
+                            }
+                            processDocumentBatch(dj, totalSubtasks, completedUnits, totalUnits, lastReportedPct);
+                            inFlightDocs_.fetch_sub(1);
+                            {
+                                std::lock_guard<std::mutex> lk2(sync->mtx);
+                                sync->inFlight--;
+                                sync->cv.notify_one();
+                            }
+                        }));
+
+                    lk.lock();
+
+                    // Deliberate slow-down for very large batches so the machine
+                    // (and the UI) stays responsive.
+                    if (throttle > 0 && next < jobCount && !cancelRequested_.load()) {
+                        lk.unlock();
+                        for (int waited = 0; waited < throttle && !cancelRequested_.load(); waited += 10) {
+                            QThread::msleep(10);
+                        }
+                        lk.lock();
                     }
-                    emit fileFinished(res);
                 }
-                {
-                    std::lock_guard<std::mutex> lk(sync->mtx);
-                    sync->remaining--;
-                    if (sync->remaining == 0) {
-                        sync->cv.notify_one();
+
+                // Jobs that were never submitted (user cancel or shutdown).
+                for (; next < jobCount; ++next) {
+                    for (const auto& task : docJobs[next].tasks) {
+                        FileResult res;
+                        res.inputPath = task.input;
+                        res.outputPath = task.output;
+                        res.watermarkText = task.config.text;
+                        res.success = false;
+                        res.errorMessage = "Operation cancelled";
+                        {
+                            std::lock_guard<std::mutex> lk2(mutex_);
+                            results_[task.subtaskIndex] = res;
+                        }
+                        if (!shuttingDown_.load()) {
+                            emit fileFinished(res);
+                        }
                     }
                 }
-                continue;
+
+                // Let the in-flight documents drain before reporting completion.
+                sync->cv.wait(lk, [&]() { return sync->inFlight == 0; });
             }
 
-            pool_->start(QRunnable::create([this, dj, totalSubtasks, completedUnits, totalUnits, lastReportedPct, sync]() {
-                processDocumentBatch(dj, totalSubtasks, completedUnits, totalUnits, lastReportedPct);
-                {
-                    std::lock_guard<std::mutex> lk(sync->mtx);
-                    sync->remaining--;
-                    if (sync->remaining == 0) {
-                        sync->cv.notify_one();
-                    }
-                }
-            }));
-        }
+            std::vector<FileResult> fin;
+            {
+                std::lock_guard<std::mutex> lk(mutex_);
+                fin = results_;
+            }
+            running_.store(false);
+            if (!shuttingDown_.load()) {
+                emit allFinished(fin);
+            }
+        });
 
-        // Wait for all worker batches to finish
-        {
-            std::unique_lock<std::mutex> lk(sync->mtx);
-            sync->cv.wait(lk, [&]() { return sync->remaining == 0; });
-        }
-
-        std::vector<FileResult> fin;
-        {
-            std::lock_guard<std::mutex> lk(mutex_);
-            fin = results_;
-        }
-        running_.store(false);
-        emit allFinished(fin);
-    });
-
-    supervisorThread->start();
-    connect(supervisorThread, &QThread::finished, supervisorThread, &QThread::deleteLater);
+    supervisorThread_->start();
 }
 
 } // namespace pdfmark

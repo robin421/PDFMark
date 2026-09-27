@@ -5,8 +5,11 @@
 #include "watermark/WatermarkConfig.h"
 #include <QObject>
 #include <QString>
+#include <QThread>
 #include <QThreadPool>
 #include <atomic>
+#include <condition_variable>
+#include <memory>
 #include <filesystem>
 #include <functional>
 #include <mutex>
@@ -31,6 +34,16 @@ public:
     void setWatermarkConfigs(const std::vector<WatermarkConfig>& configs);
     void setSubtasks(const std::vector<FileSubtask>& subtasks);
     void setPerformanceMode(PerformanceMode mode);
+
+    // Hard cap on how many source documents are processed concurrently.
+    // 0 (default) => whatever the performance mode allows. The UI derives this
+    // from the memory budget so a huge batch cannot exhaust RAM.
+    void setMaxConcurrentDocuments(int count);
+
+    // Optional pause between two job submissions (ms). Only used for very large
+    // batches so the machine stays responsive ("process progressively").
+    void setThrottleMs(int ms);
+
     void setOutputDirectory(const fs::path& dir);
     void setPasswords(const std::unordered_map<std::string, std::string>& passwords);
     // Queue management (call before start, or after previous run finished)
@@ -46,6 +59,18 @@ public:
     void cancel();
     bool isRunning() const;
     const std::vector<FileResult>& results() const;
+
+    // Stop the supervisor thread and drain the worker pool. Idempotent and safe
+    // to call from the owner's destructor: guarantees no runnable outlives this
+    // object (previously the supervisor thread was never joined, so runnables
+    // captured a dangling `this` and crashed on exit).
+    void shutdown();
+
+    // Diagnostics: effective concurrency of the last/current run and the
+    // highest number of documents that were actually in flight at once.
+    int effectiveConcurrency() const { return effectiveConcurrency_.load(); }
+    int peakConcurrentDocuments() const { return peakInFlightDocs_.load(); }
+    int throttleMs() const { return throttleMs_.load(); }
 
 signals:
     void fileStarted(const QString& fileName, int index, int total);
@@ -80,13 +105,16 @@ private:
                               int totalUnits,
                               std::shared_ptr<std::atomic<int>> lastReportedPct);
 
-    // Legacy single-file helper retained for backward compatibility.
-    FileResult processSingleFile(const fs::path& input,
-                                 const fs::path& output,
-                                 const WatermarkConfig& config,
-                                 std::function<void(int,int)> pageCallback);
-
     fs::path outputPathFor(const fs::path& input, const std::string& watermarkText = "", int duplicateIndex = 0) const;
+
+    // Sliding-window synchronisation between the supervisor thread (which
+    // submits jobs) and the pool workers (which complete them).
+    struct BatchSyncState {
+        std::mutex mtx;
+        std::condition_variable cv;
+        int inFlight = 0;
+    };
+
     mutable std::mutex mutex_;
     WatermarkConfig config_;
     std::vector<WatermarkConfig> configs_;
@@ -98,8 +126,19 @@ private:
     std::vector<FileResult> results_;
     std::atomic<bool> running_{false};
     std::atomic<bool> cancelRequested_{false};
+    std::atomic<bool> shuttingDown_{false};
 
+    std::atomic<int> maxConcurrentDocs_{0};
+    std::atomic<int> throttleMs_{0};
+    std::atomic<int> effectiveConcurrency_{0};
+    std::atomic<int> inFlightDocs_{0};
+    std::atomic<int> peakInFlightDocs_{0};
+
+    // Owned pool (NOT QThreadPool::globalInstance(): the global pool is shared
+    // with the rest of Qt and cannot be safely drained on shutdown).
     QThreadPool* pool_ = nullptr;
+    QThread* supervisorThread_ = nullptr;
+    std::shared_ptr<BatchSyncState> sync_;
 };
 
 } // namespace pdfmark
