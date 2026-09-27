@@ -24,6 +24,10 @@
 #include <QDoubleSpinBox>
 #include <QCheckBox>
 #include <QHash>
+#include <QStackedWidget>
+#include <QRadioButton>
+#include <QButtonGroup>
+#include <QShortcut>
 
 namespace pdfmark {
 
@@ -76,7 +80,6 @@ protected:
     void onFileSelectionChanged();
     // TaskManager signals
     void onFileStarted(const QString& fileName, int index, int total);
-    void onPageProgress(const QString& fileName, int current, int total);
     void onFileProgress(int completed, int total);
     void onFileFinished(const FileResult& result);
     void onAllFinished(const std::vector<FileResult>& results);
@@ -90,15 +93,21 @@ protected:
     void onWatermarkSelectionChanged();
     void onPreviewWatermark();
 
+    // Watermark mode (template mode = global, custom mode = per-PDF)
+    void onWatermarkModeChanged();
+
     // Watermark templates
     void refreshTemplateCombo(const QString& select = QString());
-    void onApplyTemplateToCurrent();
-    void onApplyTemplateToAll();
+    void refreshTemplatePreview();
+    void loadTemplateByName(const QString& name);  // custom mode: fill editor
     void onSaveAsTemplate();
     void onManageTemplates();
     WatermarkTemplate currentUiAsTemplate(const QString& name) const;
     void applyTemplateToFile(const WatermarkTemplate& tpl, const QString& filePath);
     void applyTemplateToCurrentUi(const WatermarkTemplate& tpl);
+    // Applies a template to every PDF in the list; returns how many were set.
+    int applyTemplateToAllFiles(const WatermarkTemplate& tpl);
+    WatermarkTemplate selectedTemplate() const;  // invalid when none is picked
 
     // Auto-update
     void onCheckForUpdates();
@@ -121,26 +130,46 @@ private:
     std::vector<TaskManager::FileSubtask> buildAllConfigs(bool onlySelected = false);
     void runBatch(bool onlySelected);
 
-    // Pre-flight memory / concurrency guard. Returns false when the user
-    // cancels, otherwise applies the chosen concurrency to taskManager_.
-    bool preflightAllowsRun(const std::vector<TaskManager::FileSubtask>& subtasks);
+    // Single confirmation gate before a batch starts: shows what will be
+    // produced (files, outputs, output directory) and, for large/memory-tight
+    // batches, the memory recommendation. Returns false when the user cancels.
+    bool confirmBatchRun(const std::vector<TaskManager::FileSubtask>& subtasks,
+                         bool onlySelected);
+
+    // Dynamic button copy: "生成当前 PDF（3 条）" etc. depends on mode + config.
+    void refreshActionLabels();
+    // Scope banner: which PDFs / which template the right panel currently edits.
+    void refreshScopeLabel();
     WorkloadEstimate estimateCurrentWorkload(
         const std::vector<TaskManager::FileSubtask>& subtasks) const;
     // Rebuild the filename -> row lookup used by the progress handlers
     // (keeps them O(1) instead of scanning the whole table per signal).
     void rebuildFileIndex();
 
+    // True when the right panel is in "template mode" (global, all PDFs share
+    // one template) instead of "custom mode" (edit the current PDF only).
+    bool isTemplateMode() const;
+
     // Widgets
     QTableWidget* fileTable_ = nullptr;
     QPushButton* openFolderBtn_ = nullptr;
     QString lastOutputDir_;
     // Watermark panel
+    // Watermark mode switch (segmented control) + stacked right panel
+    QPushButton* modeTemplateBtn_ = nullptr;
+    QPushButton* modeCustomBtn_ = nullptr;
+    QButtonGroup* modeButtonGroup_ = nullptr;
+    QLabel* scopeLabel_ = nullptr;
+    QStackedWidget* watermarkModeStack_ = nullptr;
+
     // Watermark template controls
     QComboBox* templateCombo_ = nullptr;
-    QPushButton* applyTemplateBtn_ = nullptr;
-    QPushButton* applyTemplateAllBtn_ = nullptr;
     QPushButton* saveTemplateBtn_ = nullptr;
     QPushButton* manageTemplateBtn_ = nullptr;
+    QPushButton* loadTemplateBtn_ = nullptr;   // custom mode: fill editor from template
+    QPushButton* gotoCustomBtn_ = nullptr;     // template mode empty state
+    QLabel* tplPreviewLabel_ = nullptr;
+    QLabel* customHintLabel_ = nullptr;        // custom mode empty state
     QScrollArea* watermarkScrollArea_ = nullptr;
     QWidget* watermarkContainer_ = nullptr;   // holds rows in a QVBoxLayout
     QVBoxLayout* watermarkLayout_ = nullptr; // owns WatermarkRow widgets
@@ -149,6 +178,8 @@ private:
     // Shared watermark params
     QSlider* depthSlider_ = nullptr;
     QLabel* depthValueLabel_ = nullptr;
+    QSpinBox* depthSpin_ = nullptr;
+    QPushButton* previewBtn_ = nullptr;
     QComboBox* perfCombo_ = nullptr;
     QLineEdit* outputDirEdit_ = nullptr;
     // New font/rotation controls
@@ -156,7 +187,6 @@ private:
     QFontComboBox* fontCombo_ = nullptr;
     QCheckBox* boldCheck_ = nullptr;
     QCheckBox* italicCheck_ = nullptr;
-    QProgressBar* pageProgressBar_ = nullptr;
     QProgressBar* totalProgressBar_ = nullptr;
     QDialog* previewDialog_ = nullptr;
     QLabel* statusLabel_ = nullptr;
@@ -176,6 +206,7 @@ private:
     int nextWatermarkIndex_ = 0;  // monotonic index for WatermarkRow identity
     QHash<QString, int> fileNameToRow_;  // basename -> file table row
     bool preflightSuppressed_ = false;   // "don't warn again this session"
+    bool suppressBatchConfirm_ = false;  // "don't confirm small batches again"
     WatermarkTemplateStore templateStore_;
     AutoUpdater* autoUpdater_ = nullptr;
 };

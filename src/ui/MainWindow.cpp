@@ -38,6 +38,12 @@
 #include <QStandardPaths>
 #include <QInputDialog>
 #include <QCheckBox>
+#include <QRadioButton>
+#include <QStackedWidget>
+#include <QButtonGroup>
+#include <QMenu>
+#include <QSignalBlocker>
+#include <QShortcut>
 #include <algorithm>
 #include <QListWidget>
 namespace pdfmark {
@@ -45,6 +51,16 @@ namespace pdfmark {
 // Pause inserted between job submissions when a batch is much larger than the
 // concurrency window ("process progressively", keeps the machine responsive).
 static constexpr int kThrottleMs = 30;
+
+// Human hint for the watermark opacity slider (shared by the slider, the
+// spin box and programmatic style application so they can never disagree).
+static QString depthHintText(int percent) {
+    if (percent <= 8) return QStringLiteral("极浅");
+    if (percent <= 12) return QStringLiteral("偏浅");
+    if (percent <= 25) return QStringLiteral("适中");
+    if (percent <= 40) return QStringLiteral("偏深");
+    return QStringLiteral("深色");
+}
 
 // ── WatermarkRow ────────────────────────────────────────────────────────────
 WatermarkRow::WatermarkRow(const QString& initialText, int index, QWidget* parent)
@@ -55,7 +71,7 @@ WatermarkRow::WatermarkRow(const QString& initialText, int index, QWidget* paren
 
     checkBox_ = new QCheckBox(this);
     checkBox_->setChecked(true);
-    checkBox_->setToolTip("勾选后，「生成所选」会生成此水印；取消勾选则跳过");
+    checkBox_->setToolTip("勾选：生成当前 PDF 时包含此水印；取消勾选：跳过此水印");
     h->addWidget(checkBox_);
 
     lineEdit_ = new QLineEdit(this);
@@ -106,6 +122,7 @@ MainWindow::MainWindow(QWidget* parent)
 
     templateStore_.load();
     refreshTemplateCombo();
+    onWatermarkModeChanged();
     updateUiState(false);
 
     // Auto-update: create updater, add Help menu, and do a silent background check
@@ -146,12 +163,6 @@ void MainWindow::setupUi() {
     auto* addFolderBtn = new QPushButton("添加文件夹...", topBox);
     auto* clearBtn = new QPushButton("清空列表", topBox);
     auto* removeSelBtn = new QPushButton("删除选中文件", topBox);
-    auto* openFolderBtn = new QPushButton("打开生成文件夹", topBox);
-    openFolderBtn->setEnabled(false);
-    openFolderBtn->setStyleSheet("padding: 6px 14px;");
-    openFolderBtn->setToolTip("在 Finder 中打开上次生成的 PDF 所在目录");
-    connect(openFolderBtn, &QPushButton::clicked, this, &MainWindow::onOpenOutputFolder);
-
     addFilesBtn->setStyleSheet("padding: 6px 14px; font-weight: bold;");
     addFolderBtn->setStyleSheet("padding: 6px 14px;");
     clearBtn->setStyleSheet("padding: 6px 14px;");
@@ -162,8 +173,6 @@ void MainWindow::setupUi() {
     topLayout->addWidget(clearBtn);
     topLayout->addWidget(removeSelBtn);
     topLayout->addStretch();
-    topLayout->addWidget(openFolderBtn);
-    openFolderBtn_ = openFolderBtn;
     mainLayout->addWidget(topBox);
 
     connect(addFilesBtn, &QPushButton::clicked, this, &MainWindow::onAddFiles);
@@ -199,8 +208,48 @@ void MainWindow::setupUi() {
     rightLayout->setSpacing(8);
 
 
-    // Watermark templates (reusable text + style bundles)
-    auto* tplGroup = new QGroupBox("水印模板", rightContainer);
+    // ── Header: mode switch (segmented control) + scope banner ───────────
+    // "模板"    : one global template drives every PDF. Nothing per file.
+    // "自定义"  : edit the watermark rows/style of the currently selected PDF.
+    auto* headRow = new QHBoxLayout();
+    headRow->setSpacing(8);
+
+    modeTemplateBtn_ = new QPushButton("模板", rightContainer);
+    modeCustomBtn_ = new QPushButton("自定义", rightContainer);
+    for (QPushButton* b : {modeTemplateBtn_, modeCustomBtn_}) {
+        b->setCheckable(true);
+        b->setCursor(Qt::PointingHandCursor);
+        b->setStyleSheet(
+            "QPushButton{border:1px solid #c8d0da;background:#ffffff;padding:5px 18px;}"
+            "QPushButton:checked{background:#0078d4;color:#ffffff;border-color:#0078d4;font-weight:bold;}"
+            "QPushButton:disabled{color:#aaaaaa;background:#f2f4f7;}");
+    }
+    modeTemplateBtn_->setChecked(true);
+    modeTemplateBtn_->setToolTip("用一个全局模板生成：选好模板后点生成即可，无需逐个文件配置");
+    modeCustomBtn_->setToolTip("只为当前选中的 PDF 单独编辑水印文字与样式");
+    modeButtonGroup_ = new QButtonGroup(this);
+    modeButtonGroup_->setExclusive(true);
+    modeButtonGroup_->addButton(modeTemplateBtn_);
+    modeButtonGroup_->addButton(modeCustomBtn_);
+    headRow->addWidget(modeTemplateBtn_);
+    headRow->addWidget(modeCustomBtn_);
+
+    scopeLabel_ = new QLabel(rightContainer);
+    scopeLabel_->setStyleSheet("color:#666666; font-size:12px;");
+    scopeLabel_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    scopeLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    headRow->addWidget(scopeLabel_, 1);
+    rightLayout->addLayout(headRow);
+
+    watermarkModeStack_ = new QStackedWidget(rightContainer);
+
+    // ── Page 0: template mode ─────────────────────────────────────────────
+    auto* tplPage = new QWidget(watermarkModeStack_);
+    auto* tplPageLayout = new QVBoxLayout(tplPage);
+    tplPageLayout->setContentsMargins(0, 0, 0, 0);
+    tplPageLayout->setSpacing(8);
+
+    auto* tplGroup = new QGroupBox("水印模板", tplPage);
     auto* tplLayout = new QVBoxLayout(tplGroup);
     tplLayout->setContentsMargins(10, 12, 10, 10);
     tplLayout->setSpacing(6);
@@ -210,30 +259,46 @@ void MainWindow::setupUi() {
     tplRow1->addWidget(new QLabel("模板:", tplGroup));
     templateCombo_ = new QComboBox(tplGroup);
     templateCombo_->setMinimumWidth(140);
-    templateCombo_->setToolTip("选择一个已保存的水印模板（多行文字 + 一套样式）");
+    templateCombo_->setToolTip("选择一个已保存的全局模板（多行文字 + 一套样式）");
     tplRow1->addWidget(templateCombo_, 1);
-    tplLayout->addLayout(tplRow1);
-
-    auto* tplRow2 = new QHBoxLayout();
-    tplRow2->setSpacing(6);
-    applyTemplateBtn_ = new QPushButton("应用", tplGroup);
-    applyTemplateBtn_->setToolTip("将所选模板（文字 + 样式）套用到当前选中的 PDF");
-    applyTemplateAllBtn_ = new QPushButton("应用到全部文件", tplGroup);
-    applyTemplateAllBtn_->setToolTip("将所选模板套用到左侧列表中的所有 PDF，然后点击「生成全部」批量固化");
-    saveTemplateBtn_ = new QPushButton("存为模板...", tplGroup);
-    saveTemplateBtn_->setToolTip("把当前文件的水印文字与样式保存为可复用的模板");
     manageTemplateBtn_ = new QPushButton("管理...", tplGroup);
     manageTemplateBtn_->setToolTip("重命名或删除已保存的水印模板");
-    tplRow2->addWidget(applyTemplateBtn_);
-    tplRow2->addWidget(applyTemplateAllBtn_);
-    tplRow2->addStretch();
-    tplRow2->addWidget(saveTemplateBtn_);
-    tplRow2->addWidget(manageTemplateBtn_);
-    tplLayout->addLayout(tplRow2);
-    rightLayout->addWidget(tplGroup);
+    tplRow1->addWidget(manageTemplateBtn_);
+    tplLayout->addLayout(tplRow1);
+
+    tplPreviewLabel_ = new QLabel(tplGroup);
+    tplPreviewLabel_->setWordWrap(true);
+    tplPreviewLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    tplPreviewLabel_->setStyleSheet(
+        "color:#3a3a3a; background:#f7f9fc; border:1px solid #dde3ea; "
+        "border-radius:4px; padding:8px;");
+    tplLayout->addWidget(tplPreviewLabel_);
+
+    // Empty-state action: there is nothing to generate with until a template
+    // exists, so offer the one step that fixes it.
+    gotoCustomBtn_ = new QPushButton("去「自定义」创建模板", tplGroup);
+    gotoCustomBtn_->setCursor(Qt::PointingHandCursor);
+    gotoCustomBtn_->setStyleSheet("padding:5px 12px;");
+    gotoCustomBtn_->setToolTip("在自定义模式里编辑水印文字与样式，再点「存为模板...」即可生成全局模板");
+    tplLayout->addWidget(gotoCustomBtn_, 0, Qt::AlignLeft);
+    tplPageLayout->addWidget(tplGroup);
+    tplPageLayout->addStretch();
+
+    // ── Page 1: custom mode (per-PDF editing) ─────────────────────────────
+    auto* customPage = new QWidget(watermarkModeStack_);
+    auto* customLayout = new QVBoxLayout(customPage);
+    customLayout->setContentsMargins(0, 0, 0, 0);
+    customLayout->setSpacing(8);
+
+    customHintLabel_ = new QLabel(customPage);
+    customHintLabel_->setWordWrap(true);
+    customHintLabel_->setStyleSheet("color:#a06000; background:#fff8e6; "
+                                    "border:1px solid #f0dca8; border-radius:4px; padding:6px;");
+    customHintLabel_->setVisible(false);
+    customLayout->addWidget(customHintLabel_);
 
     // Watermark rows scroll area
-    watermarkScrollArea_ = new QScrollArea(rightContainer);
+    watermarkScrollArea_ = new QScrollArea(customPage);
     watermarkScrollArea_->setWidgetResizable(true);
     watermarkScrollArea_->setFrameShape(QFrame::NoFrame);
     watermarkContainer_ = new QWidget(watermarkScrollArea_);
@@ -242,23 +307,29 @@ void MainWindow::setupUi() {
     watermarkLayout_->setSpacing(4);
     watermarkLayout_->addStretch();
     watermarkScrollArea_->setWidget(watermarkContainer_);
-    rightLayout->addWidget(watermarkScrollArea_, 1);
+    customLayout->addWidget(watermarkScrollArea_, 1);
 
-    addWatermarkBtn_ = new QPushButton("+ 添加水印", rightContainer);
-    addWatermarkBtn_->setStyleSheet("padding: 6px 14px; font-weight: bold;");
-    auto* previewBtn = new QPushButton("🔍 预览效果", rightContainer);
-    previewBtn->setStyleSheet("padding: 6px 14px;");
-    previewBtn->setToolTip("预览当前水印样式在 PDF 页面上的实际效果");
-    connect(previewBtn, &QPushButton::clicked, this, &MainWindow::onPreviewWatermark);
     auto* btnRow = new QHBoxLayout();
     btnRow->setSpacing(6);
+    loadTemplateBtn_ = new QPushButton("从模板载入", customPage);
+    loadTemplateBtn_->setStyleSheet("padding: 6px 14px;");
+    loadTemplateBtn_->setToolTip("选择一个模板，把它的文字与样式填入当前 PDF 的编辑区（不生成），之后可自由微调");
+    loadTemplateBtn_->setMenu(new QMenu(loadTemplateBtn_));
+    addWatermarkBtn_ = new QPushButton("+ 添加水印", customPage);
+    addWatermarkBtn_->setStyleSheet("padding: 6px 14px; font-weight: bold;");
+    // "存为模板" lives with the watermark rows it saves, and always produces a
+    // GLOBAL template (templates are never bound to a single PDF).
+    saveTemplateBtn_ = new QPushButton("存为模板...", customPage);
+    saveTemplateBtn_->setStyleSheet("padding: 6px 14px;");
+    saveTemplateBtn_->setToolTip("把当前编辑的水印文字与样式保存为全局模板（可在「模板」模式套用到任意 PDF）");
     btnRow->addWidget(addWatermarkBtn_);
-    btnRow->addWidget(previewBtn);
+    btnRow->addWidget(loadTemplateBtn_);
+    btnRow->addWidget(saveTemplateBtn_);
     btnRow->addStretch();
-    rightLayout->addLayout(btnRow);
+    customLayout->addLayout(btnRow);
 
-    // Watermark Params Group (shared style params)
-    auto* paramGroup = new QGroupBox("水印样式设置", rightContainer);
+    // Watermark style (per-PDF in custom mode)
+    auto* paramGroup = new QGroupBox("水印样式设置", customPage);
     auto* grid = new QGridLayout(paramGroup);
     grid->setContentsMargins(10, 12, 10, 10);
     grid->setHorizontalSpacing(10);
@@ -266,13 +337,25 @@ void MainWindow::setupUi() {
 
     int row = 0;
     grid->addWidget(new QLabel("颜色深浅:"), row, 0);
-    depthSlider_ = new QSlider(Qt::Horizontal, paramGroup);
+    auto* depthBox = new QWidget(paramGroup);
+    auto* depthLayout = new QHBoxLayout(depthBox);
+    depthLayout->setContentsMargins(0, 0, 0, 0);
+    depthLayout->setSpacing(8);
+    depthSlider_ = new QSlider(Qt::Horizontal, depthBox);
     depthSlider_->setRange(5, 60);
     depthSlider_->setValue(15);
-    depthValueLabel_ = new QLabel("15% (适中)", paramGroup);
-    depthValueLabel_->setFixedWidth(75);
-    grid->addWidget(depthSlider_, row, 1);
-    grid->addWidget(depthValueLabel_, row, 2);
+    depthSpin_ = new QSpinBox(depthBox);
+    depthSpin_->setRange(5, 60);
+    depthSpin_->setValue(15);
+    depthSpin_->setSuffix(" %");
+    depthSpin_->setToolTip("可直接键入精确数值（模板里保存的就是这个百分比）");
+    depthValueLabel_ = new QLabel("适中", depthBox);
+    depthValueLabel_->setStyleSheet("color:#777777; font-size:11px;");
+    depthValueLabel_->setFixedWidth(30);
+    depthLayout->addWidget(depthSlider_, 1);
+    depthLayout->addWidget(depthSpin_);
+    depthLayout->addWidget(depthValueLabel_);
+    grid->addWidget(depthBox, row, 1, 1, 2);
     row++;
 
     // Watermark Rotation (degrees)
@@ -310,30 +393,36 @@ void MainWindow::setupUi() {
     grid->addWidget(styleWidget, row, 1, 1, 2);
     row++;
 
-    // Performance mode
-    grid->addWidget(new QLabel("性能模式:"), row, 0);
-    perfCombo_ = new QComboBox(paramGroup);
-    perfCombo_->addItem("保守运行（不卡电脑）", static_cast<int>(PerformanceMode::Low));
-    perfCombo_->addItem("日常推荐（推荐）", static_cast<int>(PerformanceMode::Normal));
-    perfCombo_->addItem("火力全开（极速处理）", static_cast<int>(PerformanceMode::High));
-    perfCombo_->setCurrentIndex(1);
-    perfCombo_->setToolTip("引擎限制：PDFium 非线程安全，页面解析与光栅化已全局串行；\n"
-                           "并发只用于重叠水印绘制、JPEG 编码与磁盘 I/O。\n"
-                           "保守运行：同一时刻只处理 1 个文件，最省内存，适合边办公边处理\n"
-                           "日常推荐：2 个文件并行，速度与内存均衡，适合大多数场景\n"
-                           "火力全开：最多 4 个文件并行，对扫描件/大页 PDF 的 JPEG 编码更快，但内存占用更高");
-    grid->addWidget(perfCombo_, row, 1, 1, 2);
-    row++;
-    // Output directory
-    grid->addWidget(new QLabel("输出目录:"), row, 0);
-    outputDirEdit_ = new QLineEdit(paramGroup);
+    customLayout->addWidget(paramGroup);
+
+    watermarkModeStack_->addWidget(tplPage);
+    watermarkModeStack_->addWidget(customPage);
+    rightLayout->addWidget(watermarkModeStack_, 1);
+
+    // ── Output settings (shared by both modes) ───────────────────────────
+    auto* outGroup = new QGroupBox("输出", rightContainer);
+    auto* outGrid = new QGridLayout(outGroup);
+    outGrid->setContentsMargins(10, 12, 10, 10);
+    outGrid->setHorizontalSpacing(10);
+    outGrid->setVerticalSpacing(10);
+
+    outGrid->addWidget(new QLabel("输出目录:"), 0, 0);
+    outputDirEdit_ = new QLineEdit(outGroup);
     outputDirEdit_->setPlaceholderText("默认与源文件相同目录");
-    auto* browseBtn = new QPushButton("选择...", paramGroup);
+    auto* browseBtn = new QPushButton("选择...", outGroup);
     browseBtn->setStyleSheet("padding: 4px 10px;");
-    grid->addWidget(outputDirEdit_, row, 1);
-    grid->addWidget(browseBtn, row, 2);
+    outGrid->addWidget(outputDirEdit_, 0, 1);
+    outGrid->addWidget(browseBtn, 0, 2);
     connect(browseBtn, &QPushButton::clicked, this, &MainWindow::onSelectOutputDir);
-    rightLayout->addWidget(paramGroup);
+
+    // "打开生成文件夹" belongs with the output settings, not the file list.
+    openFolderBtn_ = new QPushButton("打开生成文件夹", outGroup);
+    openFolderBtn_->setEnabled(false);
+    openFolderBtn_->setStyleSheet("padding: 4px 10px;");
+    openFolderBtn_->setToolTip("在 Finder / 资源管理器中打开上次生成的 PDF 所在目录");
+    connect(openFolderBtn_, &QPushButton::clicked, this, &MainWindow::onOpenOutputFolder);
+    outGrid->addWidget(openFolderBtn_, 0, 3);
+    rightLayout->addWidget(outGroup);
 
     splitter->addWidget(rightContainer);
     splitter->setStretchFactor(0, 3);
@@ -350,14 +439,7 @@ void MainWindow::setupUi() {
 
     // Progress bars row
     auto* progRow = new QHBoxLayout();
-    progRow->addWidget(new QLabel("单文件页进度:"));
-    pageProgressBar_ = new QProgressBar(statusCard);
-    pageProgressBar_->setRange(0, 100);
-    pageProgressBar_->setValue(0);
-    pageProgressBar_->setTextVisible(true);
-    progRow->addWidget(pageProgressBar_);
-    progRow->addSpacing(16);
-    progRow->addWidget(new QLabel("总体队列进度:"));
+    progRow->addWidget(new QLabel("总体进度:"));
     totalProgressBar_ = new QProgressBar(statusCard);
     totalProgressBar_->setRange(0, 100);
     totalProgressBar_->setValue(0);
@@ -370,15 +452,39 @@ void MainWindow::setupUi() {
     statusLabel_->setStyleSheet("color: #555555; font-size: 13px;");
     ctlRow->addWidget(statusLabel_, 1);
 
+    // 性能模式紧挨着生成按钮，运行时最常调的开关就在这里
+    // 预览提升为全局动作：模板模式预览模板，自定义模式预览当前编辑内容
+    previewBtn_ = new QPushButton("预览", statusCard);
+    previewBtn_->setStyleSheet("padding: 5px 12px;");
+    previewBtn_->setToolTip("预览水印在 PDF 页面上的实际效果");
+    connect(previewBtn_, &QPushButton::clicked, this, &MainWindow::onPreviewWatermark);
+    ctlRow->addWidget(previewBtn_);
+    ctlRow->addSpacing(8);
+
+    ctlRow->addWidget(new QLabel("性能:", statusCard));
+    perfCombo_ = new QComboBox(statusCard);
+    perfCombo_->addItem("保守（1 个文件）", static_cast<int>(PerformanceMode::Low));
+    perfCombo_->addItem("日常推荐（2 个文件）", static_cast<int>(PerformanceMode::Normal));
+    perfCombo_->addItem("火力全开（最多 4 个）", static_cast<int>(PerformanceMode::High));
+    perfCombo_->setCurrentIndex(1);
+    perfCombo_->setMinimumWidth(150);
+    perfCombo_->setToolTip("引擎限制：PDFium 非线程安全，页面解析与光栅化已全局串行；\n"
+                           "并发只用于重叠水印绘制、JPEG 编码与磁盘 I/O。\n"
+                           "保守：同一时刻只处理 1 个文件，最省内存\n"
+                           "日常推荐：2 个文件并行，速度与内存均衡\n"
+                           "火力全开：最多 4 个文件并行，大页/扫描件更快，内存占用更高");
+    ctlRow->addWidget(perfCombo_);
+    ctlRow->addSpacing(8);
+
     cancelBtn_ = new QPushButton("取消", statusCard);
     cancelBtn_->setEnabled(false);
     cancelBtn_->setStyleSheet("padding: 5px 12px;");
     connect(cancelBtn_, &QPushButton::clicked, this, &MainWindow::onCancelClicked);
     ctlRow->addWidget(cancelBtn_);
 
-    startSelectedBtn_ = new QPushButton("生成所选", statusCard);
+    startSelectedBtn_ = new QPushButton("生成当前 PDF", statusCard);
     startSelectedBtn_->setEnabled(false);
-    startSelectedBtn_->setToolTip("仅生成当前文件中已勾选的水印，未勾选的水印会跳过");
+    startSelectedBtn_->setToolTip("生成当前 PDF（自定义模式下只生成已勾选的水印）");
     startSelectedBtn_->setStyleSheet(
         "QPushButton { background-color: #107c10; color: white; font-weight: bold; "
         "padding: 7px 16px; border-radius: 4px; font-size: 14px; }"
@@ -388,8 +494,8 @@ void MainWindow::setupUi() {
     connect(startSelectedBtn_, &QPushButton::clicked, this, &MainWindow::onStartSelectedClicked);
     ctlRow->addWidget(startSelectedBtn_);
 
-    startAllBtn_ = new QPushButton("生成全部", statusCard);
-    startAllBtn_->setToolTip("忽略勾选，生成所有文件的所有水印");
+    startAllBtn_ = new QPushButton("生成全部 PDF", statusCard);
+    startAllBtn_->setToolTip("忽略勾选，生成列表中所有 PDF 的所有水印");
     startAllBtn_->setStyleSheet(
         "QPushButton { background-color: #0078d4; color: white; font-weight: bold; "
         "padding: 7px 16px; border-radius: 4px; font-size: 14px; }"
@@ -405,13 +511,24 @@ void MainWindow::setupUi() {
 
 void MainWindow::setupConnections() {
     connect(depthSlider_, &QSlider::valueChanged, this, [this](int val) {
-        QString hint = "适中";
-        if (val <= 8) hint = "极浅";
-        else if (val <= 12) hint = "偏浅";
-        else if (val <= 25) hint = "适中";
-        else if (val <= 40) hint = "偏深";
-        else hint = "深色";
-        depthValueLabel_->setText(QString("%1% (%2)").arg(val).arg(hint));
+        if (depthSpin_->value() != val) {
+            QSignalBlocker block(depthSpin_);
+            depthSpin_->setValue(val);
+        }
+        depthValueLabel_->setText(depthHintText(val));
+    });
+    connect(depthSpin_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int val) {
+        if (depthSlider_->value() != val) depthSlider_->setValue(val);
+    });
+
+    // Keyboard shortcuts
+    auto* openSc = new QShortcut(QKeySequence::Open, this);
+    connect(openSc, &QShortcut::activated, this, &MainWindow::onAddFiles);
+    auto* genSc = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Return), this);
+    connect(genSc, &QShortcut::activated, this, &MainWindow::onStartAllClicked);
+    auto* escSc = new QShortcut(QKeySequence(Qt::Key_Escape), this);
+    connect(escSc, &QShortcut::activated, this, [this]() {
+        if (taskManager_.isRunning()) onCancelClicked();
     });
 
     // File selection change
@@ -421,18 +538,36 @@ void MainWindow::setupConnections() {
     // Add watermark row button
     connect(addWatermarkBtn_, &QPushButton::clicked, this, &MainWindow::addWatermarkRow);
 
+    // Watermark mode switch (segmented control)
+    connect(modeTemplateBtn_, &QPushButton::toggled, this, &MainWindow::onWatermarkModeChanged);
+    connect(modeCustomBtn_, &QPushButton::toggled, this, &MainWindow::onWatermarkModeChanged);
+    connect(gotoCustomBtn_, &QPushButton::clicked, this, [this]() {
+        modeCustomBtn_->setChecked(true);   // toggled -> onWatermarkModeChanged
+    });
+
     // Watermark template controls
-    connect(applyTemplateBtn_, &QPushButton::clicked, this, &MainWindow::onApplyTemplateToCurrent);
-    connect(applyTemplateAllBtn_, &QPushButton::clicked, this, &MainWindow::onApplyTemplateToAll);
+    connect(loadTemplateBtn_->menu(), &QMenu::aboutToShow, this, [this]() {
+        QMenu* menu = loadTemplateBtn_->menu();
+        menu->clear();
+        for (const auto& tpl : templateStore_.templates()) {
+            const QString name = QString::fromUtf8(tpl.name.c_str());
+            QAction* act = menu->addAction(name);
+            connect(act, &QAction::triggered, this, [this, name]() { loadTemplateByName(name); });
+        }
+        if (menu->isEmpty()) {
+            QAction* none = menu->addAction("（暂无模板）");
+            none->setEnabled(false);
+        }
+    });
     connect(saveTemplateBtn_, &QPushButton::clicked, this, &MainWindow::onSaveAsTemplate);
     connect(manageTemplateBtn_, &QPushButton::clicked, this, &MainWindow::onManageTemplates);
     connect(templateCombo_, &QComboBox::currentIndexChanged, this, [this](int) {
+        refreshTemplatePreview();
         updateUiState(taskManager_.isRunning());
     });
 
     // TaskManager signals
     connect(&taskManager_, &TaskManager::fileStarted, this, &MainWindow::onFileStarted);
-    connect(&taskManager_, &TaskManager::pageProgress, this, &MainWindow::onPageProgress);
     connect(&taskManager_, &TaskManager::fileProgress, this, &MainWindow::onFileProgress);
     connect(&taskManager_, &TaskManager::fileFinished, this, &MainWindow::onFileFinished);
     connect(&taskManager_, &TaskManager::allFinished, this, &MainWindow::onAllFinished);
@@ -465,13 +600,21 @@ void MainWindow::applyStyleToUi(const WatermarkConfig& style) {
     fontCombo_->setCurrentFont(QFont(family));
     boldCheck_->setChecked(style.fontBold);
     italicCheck_->setChecked(style.fontItalic);
-    depthSlider_->setValue(static_cast<int>(style.opacity * 100.0 + 0.5));
+
+    const int percent = static_cast<int>(style.opacity * 100.0 + 0.5);
+    {
+        QSignalBlocker blockSlider(depthSlider_);
+        QSignalBlocker blockSpin(depthSpin_);
+        depthSlider_->setValue(percent);
+        depthSpin_->setValue(percent);
+    }
+    depthValueLabel_->setText(depthHintText(percent));
 }
 
 WatermarkConfig MainWindow::currentConfig() const {
     WatermarkConfig cfg = styleFromUi();
     // Prefer the first checked, non-empty row so the preview matches what
-    // "生成所选" will actually produce; fall back to the first non-empty row.
+    // generating the current PDF will actually produce; else fall back to the
     WatermarkConfig fallback;
     bool hasFallback = false;
     for (int i = 0; i < watermarkLayout_->count(); ++i) {
@@ -609,6 +752,8 @@ void MainWindow::onFileSelectionChanged() {
         currentSelectedFile_ = item ? item->text() : QString();
     }
     loadWatermarksForSelectedFile();
+    refreshScopeLabel();
+    refreshActionLabels();
     updateUiState(false);
 }
 
@@ -740,13 +885,21 @@ void MainWindow::dropEvent(QDropEvent* event) {
 
 void MainWindow::onClearFiles() {
     if (taskManager_.isRunning()) return;
+    if (fileTable_->rowCount() > 0) {
+        const auto answer = QMessageBox::question(
+            this, "清空列表",
+            QString("确定清空列表中的 %1 个 PDF 吗？\n\n"
+                    "只会移除列表项，不会删除任何文件；已配置的水印也会一并清除。")
+                .arg(fileTable_->rowCount()),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (answer != QMessageBox::Yes) return;
+    }
     fileTable_->setRowCount(0);
     fileWatermarkConfigs_.clear();
     perPdfConfigMap_.clear();
     currentSelectedFile_.clear();
     fileNameToRow_.clear();
     taskManager_.clear();
-    pageProgressBar_->setValue(0);
     totalProgressBar_->setValue(0);
     loadWatermarksForSelectedFile();
     statusLabel_->setText("列表已清空。");
@@ -765,13 +918,17 @@ void MainWindow::onCancelClicked() {
 }
 void MainWindow::updateUiState(bool running) {
     cancelBtn_->setEnabled(running);
-    startAllBtn_->setEnabled(!running && fileTable_->rowCount() > 0);
 
-    // "生成所选" only makes sense when the current file has at least one
-    // checked, non-empty watermark.
+    const bool hasTemplate = templateCombo_ && !templateCombo_->currentData().toString().isEmpty();
+    const bool hasFile = !currentSelectedFile_.isEmpty();
+    const bool hasRows = fileTable_->rowCount() > 0;
+
+    // "生成当前 PDF" in custom mode needs at least one checked, non-empty watermark.
+    // In template mode the template is applied automatically, so having a
+    // template is enough.
     bool hasCheckedWatermark = false;
     auto itChecked = fileWatermarkConfigs_.find(currentSelectedFile_);
-    if (!currentSelectedFile_.isEmpty() && itChecked != fileWatermarkConfigs_.end()) {
+    if (hasFile && itChecked != fileWatermarkConfigs_.end()) {
         for (const auto& cfg : itChecked->second) {
             if (cfg.selected && !cfg.text.empty()) {
                 hasCheckedWatermark = true;
@@ -779,23 +936,40 @@ void MainWindow::updateUiState(bool running) {
             }
         }
     }
-    startSelectedBtn_->setEnabled(!running && hasCheckedWatermark);
-    addWatermarkBtn_->setEnabled(!running && !currentSelectedFile_.isEmpty());
 
-    const bool hasTemplate = templateCombo_ && !templateCombo_->currentData().toString().isEmpty();
+    const bool tplMode = isTemplateMode();
+    if (tplMode) {
+        startAllBtn_->setEnabled(!running && hasRows && hasTemplate);
+        startSelectedBtn_->setEnabled(!running && hasFile && hasTemplate);
+    } else {
+        startAllBtn_->setEnabled(!running && hasRows);
+        startSelectedBtn_->setEnabled(!running && hasCheckedWatermark);
+    }
+
+    // Mode switch
+    modeTemplateBtn_->setEnabled(!running);
+    modeCustomBtn_->setEnabled(!running);
+
+    // Template-mode page
     templateCombo_->setEnabled(!running);
-    applyTemplateBtn_->setEnabled(!running && hasTemplate && !currentSelectedFile_.isEmpty());
-    applyTemplateAllBtn_->setEnabled(!running && hasTemplate && fileTable_->rowCount() > 0);
-    saveTemplateBtn_->setEnabled(!running && !currentSelectedFile_.isEmpty());
     manageTemplateBtn_->setEnabled(!running);
+    gotoCustomBtn_->setEnabled(!running);
 
+    // Custom-mode page (per-PDF editing)
+    addWatermarkBtn_->setEnabled(!running && hasFile);
+    loadTemplateBtn_->setEnabled(!running && hasFile && !templateStore_.templates().empty());
+    saveTemplateBtn_->setEnabled(!running && hasFile);
     depthSlider_->setEnabled(!running);
-    perfCombo_->setEnabled(!running);
-    outputDirEdit_->setEnabled(!running);
+    depthSpin_->setEnabled(!running);
     rotationSpin_->setEnabled(!running);
     fontCombo_->setEnabled(!running);
     boldCheck_->setEnabled(!running);
     italicCheck_->setEnabled(!running);
+
+    // Shared
+    previewBtn_->setEnabled(!running);
+    perfCombo_->setEnabled(!running);
+    outputDirEdit_->setEnabled(!running);
 }
 
 void MainWindow::onRemoveSelectedFile() {
@@ -809,6 +983,15 @@ void MainWindow::onRemoveSelectedFile() {
     // shifted row — deleting 3 extra files per selected row.
     QList<int> selectedRows = selectedRowsDescending(fileTable_);
     if (selectedRows.empty()) return;
+
+    if (QMessageBox::question(
+            this, "删除选中文件",
+            QString("确定从列表中移除选中的 %1 个文件吗？\n\n"
+                    "只会移除列表项，不会删除磁盘上的 PDF，也不会删除已生成的输出。")
+                .arg(selectedRows.size()),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) {
+        return;
+    }
 
     for (int row : selectedRows) {
         if (row < 0 || row >= fileTable_->rowCount()) continue;
@@ -893,13 +1076,15 @@ WorkloadEstimate MainWindow::estimateCurrentWorkload(
     return estimateWorkload(in);
 }
 
-bool MainWindow::preflightAllowsRun(const std::vector<TaskManager::FileSubtask>& subtasks) {
+bool MainWindow::confirmBatchRun(const std::vector<TaskManager::FileSubtask>& subtasks,
+                                 bool onlySelected) {
     const WorkloadEstimate est = estimateCurrentWorkload(subtasks);
     const PerformanceMode mode =
         static_cast<PerformanceMode>(perfCombo_->currentData().toInt());
     const int cpuCap = std::max(1, WorkerPool::idealWorkerCount(mode));
     const int recommended = std::max(1, est.recommendedConcurrentDocs);
     const bool bigBatch = est.fileCount > 2 * recommended;
+    const bool risky = needsPreflightWarning(est);
 
     auto applyPlan = [this](int docs, bool throttle) {
         taskManager_.setMaxConcurrentDocuments(docs);
@@ -909,59 +1094,95 @@ bool MainWindow::preflightAllowsRun(const std::vector<TaskManager::FileSubtask>&
         return QString::number(static_cast<double>(bytes) / (1024.0 * 1024.0), 'f', 0);
     };
 
-    if (preflightSuppressed_ || !needsPreflightWarning(est)) {
-        // Silent safety cap: never spawn more concurrent documents than the
-        // RAM budget allows, even when the batch is small enough to skip the UI.
+    if (suppressBatchConfirm_) {
         applyPlan(recommended, bigBatch);
         return true;
     }
 
-    const QString detail = QString(
-        "本次任务规模：\n"
-        "  • 文件：%1 个\n"
-        "  • 水印：%2 条（共 %3 次页面水印处理）\n"
-        "  • 部分文件页数未知时按 10 页估算：%4\n"
-        "  • 单个文件峰值内存：约 %5 MB\n\n"
-        "  推荐并发：%6 个文件（当前性能模式为 %7 个）\n"
-        "  预计峰值内存：约 %8 MB，可用约 %9 MB\n"
-        "  内存风险评估：%10")
+    // Writing files cannot be undone, so always state exactly what is about to
+    // happen and where it lands.
+    const QString outDir = outputDirEdit_->text().trimmed().isEmpty()
+        ? QStringLiteral("与源文件相同目录（按水印文字自动建子目录）")
+        : outputDirEdit_->text().trimmed();
+
+    QString sourceDesc;
+    if (isTemplateMode()) {
+        const WatermarkTemplate tpl = selectedTemplate();
+        sourceDesc = QString("模板「%1」").arg(QString::fromUtf8(tpl.name.c_str()));
+    } else if (onlySelected) {
+        sourceDesc = QStringLiteral("当前 PDF 中已勾选的水印");
+    } else {
+        sourceDesc = QStringLiteral("各文件自己的水印配置");
+    }
+
+    QString detail = QString(
+        "将生成 %1 个文件（共 %2 个 PDF）\n"
+        "水印来源：%3\n"
+        "输出目录：%4")
+        .arg(subtasks.size())
         .arg(est.fileCount)
-        .arg(est.watermarkCount)
-        .arg(est.estimatedPages)
-        .arg(est.pagesEstimated ? "是" : "否")
-        .arg(mb(est.perDocPeakBytes))
-        .arg(recommended)
-        .arg(cpuCap)
-        .arg(mb(std::max(est.peakBytes, est.perDocPeakBytes)))
-        .arg(mb(est.usableRamBytes))
-        .arg(QString::fromUtf8(workloadRiskLabel(est.risk)));
+        .arg(sourceDesc)
+        .arg(outDir);
+
+    if (risky) {
+        detail += QString(
+            "\n\n资源评估：\n"
+            "  • 处理页数：约 %1 页（页数未知的按 10 页估算：%2）\n"
+            "  • 单文件峰值内存：约 %3 MB\n"
+            "  • 推荐并发：%4 个文件（当前性能模式为 %5 个）\n"
+            "  • 预计峰值内存：约 %6 MB，可用约 %7 MB\n"
+            "  • 内存风险：%8")
+            .arg(est.estimatedPages)
+            .arg(est.pagesEstimated ? "是" : "否")
+            .arg(mb(est.perDocPeakBytes))
+            .arg(recommended)
+            .arg(cpuCap)
+            .arg(mb(std::max(est.peakBytes, est.perDocPeakBytes)))
+            .arg(mb(est.usableRamBytes))
+            .arg(QString::fromUtf8(workloadRiskLabel(est.risk)));
+    }
 
     QMessageBox box(this);
-    box.setWindowTitle("开始前的资源检查");
+    box.setWindowTitle(risky ? "开始前的资源检查" : "确认生成");
     box.setIcon(est.risk == WorkloadRisk::Risky ? QMessageBox::Warning
                                                 : QMessageBox::Information);
     box.setTextInteractionFlags(Qt::TextSelectableByMouse);
     box.setText(detail);
-    box.setInformativeText(est.risk == WorkloadRisk::Risky
-        ? "按当前设置运行很可能因内存不足而崩溃或被系统终止，建议使用推荐设置。"
-        : "建议使用推荐设置：程序会自动分批处理，并在必要时降速，以避免卡顿或崩溃。");
+    if (risky) {
+        box.setInformativeText(est.risk == WorkloadRisk::Risky
+            ? "按当前设置运行很可能因内存不足而崩溃或被系统终止，建议使用推荐设置。"
+            : "建议使用推荐设置：程序会自动分批处理，并在必要时降速，以避免卡顿或崩溃。");
+    }
 
-    QPushButton* recommendBtn = box.addButton("按推荐设置继续", QMessageBox::AcceptRole);
-    QPushButton* currentBtn = box.addButton("按当前设置继续", QMessageBox::DestructiveRole);
-    QPushButton* cancelBtn = box.addButton("取消", QMessageBox::RejectRole);
-    QCheckBox* dontAsk = new QCheckBox("本次会话不再提示", &box);
+    QPushButton* primaryBtn = nullptr;
+    QPushButton* currentBtn = nullptr;
+    QPushButton* cancelBtn = nullptr;
+    if (risky) {
+        primaryBtn = box.addButton("按推荐设置继续", QMessageBox::AcceptRole);
+        currentBtn = box.addButton("按当前设置继续", QMessageBox::DestructiveRole);
+        cancelBtn = box.addButton("取消", QMessageBox::RejectRole);
+    } else {
+        primaryBtn = box.addButton("开始生成", QMessageBox::AcceptRole);
+        cancelBtn = box.addButton("取消", QMessageBox::RejectRole);
+    }
+
+    QCheckBox* dontAsk = new QCheckBox(risky ? "本次会话不再提示资源检查"
+                                             : "本次会话不再提示生成确认", &box);
     box.setCheckBox(dontAsk);
-    box.setDefaultButton(est.risk == WorkloadRisk::Risky ? cancelBtn : recommendBtn);
+    box.setDefaultButton(est.risk == WorkloadRisk::Risky ? cancelBtn : primaryBtn);
 
     box.exec();
-    if (dontAsk->isChecked()) preflightSuppressed_ = true;
+    if (dontAsk->isChecked()) {
+        if (risky) preflightSuppressed_ = true;
+        else suppressBatchConfirm_ = true;
+    }
 
     if (box.clickedButton() == cancelBtn) {
-        statusLabel_->setText("已取消（资源预检未通过）。");
+        statusLabel_->setText("已取消生成。");
         return false;
     }
 
-    if (box.clickedButton() == currentBtn) {
+    if (risky && box.clickedButton() == currentBtn) {
         if (est.risk == WorkloadRisk::Risky) {
             const auto answer = QMessageBox::warning(
                 this, "确认风险",
@@ -969,7 +1190,7 @@ bool MainWindow::preflightAllowsRun(const std::vector<TaskManager::FileSubtask>&
                 "确定仍按当前设置继续吗？",
                 QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
             if (answer != QMessageBox::Yes) {
-                statusLabel_->setText("已取消（资源预检未通过）。");
+                statusLabel_->setText("已取消生成。");
                 return false;
             }
         }
@@ -979,7 +1200,9 @@ bool MainWindow::preflightAllowsRun(const std::vector<TaskManager::FileSubtask>&
     }
 
     applyPlan(recommended, bigBatch);
-    statusLabel_->setText(QString("按推荐设置运行（并发 %1，分批处理）。").arg(recommended));
+    statusLabel_->setText(QString("开始生成（并发 %1%2）。")
+        .arg(recommended)
+        .arg(bigBatch ? QStringLiteral("，分批+限速") : QString()));
     return true;
 }
 
@@ -1034,23 +1257,46 @@ void MainWindow::runBatch(bool onlySelected) {
         return;
     }
 
+    // Template mode: the selected global template is applied automatically, so
+    // the user never has to press "apply" first (and a stale apply can never be
+    // used by accident).
+    if (isTemplateMode()) {
+        const WatermarkTemplate tpl = selectedTemplate();
+        if (!tpl.isValid()) {
+            QMessageBox::warning(this, "提示",
+                "请先选择一个水印模板。\n\n"
+                "还没有模板？点上面的「去「自定义」创建模板」。");
+            return;
+        }
+        if (onlySelected) {
+            if (currentSelectedFile_.isEmpty()) {
+                QMessageBox::warning(this, "提示", "请先在左侧列表选择一个 PDF 文件。");
+                return;
+            }
+            applyTemplateToCurrentUi(tpl);
+        } else {
+            applyTemplateToAllFiles(tpl);
+        }
+    }
+
     auto subtasks = buildAllConfigs(onlySelected);
     if (subtasks.empty()) {
         if (onlySelected) {
             QMessageBox::warning(this, "提示",
-                "当前文件没有已勾选的水印，请至少勾选一个水印文字后再次开始。\n"
-                "操作：左侧选中文件 → 右侧勾选要生成的水印。");
+                "当前 PDF 没有已勾选的水印。\n\n"
+                "操作：在「自定义」模式下勾选至少一条水印文字，再点「生成当前 PDF」。");
         } else {
             QMessageBox::warning(this, "提示",
-                "请为列表中的文件添加至少一个水印文字后再次开始。\n"
-                "操作：左侧选中文件 → 右侧点击 \"+ 添加水印\"。");
+                "列表中的文件还没有可用的水印。\n\n"
+                "操作：在「自定义」模式下为文件添加水印文字，"
+                "或用「存为模板...」存成模板后在「模板」模式下生成。");
         }
         return;
     }
 
     // Pre-flight memory/concurrency guard: may warn, may cancel, and always
     // caps concurrency so a huge batch cannot exhaust RAM.
-    if (!preflightAllowsRun(subtasks)) {
+    if (!confirmBatchRun(subtasks, onlySelected)) {
         return;
     }
 
@@ -1085,11 +1331,6 @@ void MainWindow::onFileStarted(const QString& fileName, int index, int total) {
             statusItem->setText("处理中...");
         }
     }
-}
-
-void MainWindow::onPageProgress(const QString& /*fileName*/, int current, int total) {
-    int pct = total > 0 ? (current * 100 / total) : 0;
-    pageProgressBar_->setValue(pct);
 }
 
 void MainWindow::onFileProgress(int completed, int total) {
@@ -1182,8 +1423,18 @@ void MainWindow::onPasswordRequired(const QString& filePath) {
     }
 }
 void MainWindow::onPreviewWatermark() {
-    // Get current config
-    WatermarkConfig cfg = currentConfig();
+    WatermarkConfig cfg;
+    if (isTemplateMode()) {
+        const WatermarkTemplate tpl = selectedTemplate();
+        if (!tpl.isValid()) {
+            QMessageBox::information(this, "提示",
+                "请先选择一个水印模板再预览；或在「自定义」中编辑水印后预览。");
+            return;
+        }
+        cfg = tpl.style();
+    } else {
+        cfg = currentConfig();
+    }
     if (cfg.text.empty()) {
         cfg.text = "机密文件 请勿外传";
     }
@@ -1198,8 +1449,9 @@ void MainWindow::onPreviewWatermark() {
     layout->setContentsMargins(12, 12, 12, 12);
     layout->setSpacing(8);
 
+    const QString modeTag = isTemplateMode() ? QStringLiteral("模板预览 · ") : QString();
     auto* infoLabel = new QLabel(
-        QString("水印文字：%1   倾斜：%2°   字体：%3   深浅：%4%")
+        modeTag + QString("水印文字：%1   倾斜：%2°   字体：%3   深浅：%4%")
             .arg(QString::fromUtf8(cfg.text.c_str()))
             .arg(cfg.rotationDegrees)
             .arg(QString::fromStdString(cfg.fontFamily))
@@ -1247,9 +1499,145 @@ void MainWindow::refreshTemplateCombo(const QString& select) {
     templateCombo_->setCurrentIndex(idx);
     templateCombo_->blockSignals(false);
 
+    refreshTemplatePreview();
+    refreshScopeLabel();
+    refreshActionLabels();
+
     // Enablement of the template buttons depends on whether a template is
     // selected, so refresh it here as well.
     updateUiState(taskManager_.isRunning());
+}
+
+bool MainWindow::isTemplateMode() const {
+    return modeTemplateBtn_ && modeTemplateBtn_->isChecked();
+}
+
+void MainWindow::onWatermarkModeChanged() {
+    if (!watermarkModeStack_) return;
+    watermarkModeStack_->setCurrentIndex(isTemplateMode() ? 0 : 1);
+    if (isTemplateMode()) refreshTemplatePreview();
+    refreshScopeLabel();
+    refreshActionLabels();
+    updateUiState(taskManager_.isRunning());
+}
+
+void MainWindow::refreshActionLabels() {
+    if (!startAllBtn_ || !startSelectedBtn_) return;
+    int count = 0;
+    if (isTemplateMode()) {
+        const WatermarkTemplate tpl = selectedTemplate();
+        for (const auto& wm : tpl.watermarks) {
+            if (!wm.text.empty()) count++;
+        }
+        startAllBtn_->setText(count > 0
+            ? QString("生成全部 PDF（每份 %1 条）").arg(count) : QString("生成全部 PDF"));
+        startSelectedBtn_->setText(count > 0
+            ? QString("生成当前 PDF（%1 条）").arg(count) : QString("生成当前 PDF"));
+        startAllBtn_->setToolTip("把所选模板套用到列表中所有 PDF 并生成");
+        startSelectedBtn_->setToolTip("把所选模板套用到当前 PDF 并生成");
+    } else {
+        auto it = fileWatermarkConfigs_.find(currentSelectedFile_);
+        if (!currentSelectedFile_.isEmpty() && it != fileWatermarkConfigs_.end()) {
+            for (const auto& cfg : it->second) {
+                if (cfg.selected && !cfg.text.empty()) count++;
+            }
+        }
+        startSelectedBtn_->setText(count > 0
+            ? QString("生成当前 PDF（%1 条勾选）").arg(count) : QString("生成当前 PDF"));
+        startAllBtn_->setText("生成全部 PDF");
+        startAllBtn_->setToolTip("忽略勾选，生成列表中所有 PDF 的所有水印");
+        startSelectedBtn_->setToolTip("生成当前 PDF 中已勾选的水印");
+    }
+}
+
+void MainWindow::refreshScopeLabel() {
+    if (!scopeLabel_) return;
+
+    if (!isTemplateMode()) {
+        const bool noFile = currentSelectedFile_.isEmpty();
+        customHintLabel_->setVisible(noFile);
+        if (noFile) {
+            customHintLabel_->setText("请先在左侧选择一个 PDF 文件，再为它编辑水印文字与样式。");
+        }
+    } else {
+        customHintLabel_->setVisible(false);
+    }
+
+    if (isTemplateMode()) {
+        const WatermarkTemplate tpl = selectedTemplate();
+        scopeLabel_->setText(QString("作用域：全部 %1 个 PDF · 模板「%2」")
+            .arg(fileTable_->rowCount())
+            .arg(tpl.isValid() ? QString::fromUtf8(tpl.name.c_str()) : QStringLiteral("未选择")));
+        scopeLabel_->setStyleSheet(tpl.isValid()
+            ? "color:#666666; font-size:12px;"
+            : "color:#b26a00; font-size:12px; font-weight:bold;");
+    } else if (currentSelectedFile_.isEmpty()) {
+        scopeLabel_->setText("作用域：当前 PDF · 未选择文件");
+        scopeLabel_->setStyleSheet("color:#b26a00; font-size:12px; font-weight:bold;");
+    } else {
+        scopeLabel_->setText(QString("作用域：当前 PDF · %1").arg(QFileInfo(currentSelectedFile_).fileName()));
+        scopeLabel_->setStyleSheet("color:#666666; font-size:12px;");
+    }
+}
+
+WatermarkTemplate MainWindow::selectedTemplate() const {
+    const QString name = templateCombo_ ? templateCombo_->currentData().toString() : QString();
+    if (name.isEmpty()) return WatermarkTemplate{};
+    const WatermarkTemplate* found = templateStore_.find(name);
+    return found ? *found : WatermarkTemplate{};
+}
+
+void MainWindow::refreshTemplatePreview() {
+    if (!tplPreviewLabel_) return;
+
+    const WatermarkTemplate tpl = selectedTemplate();
+    if (gotoCustomBtn_) gotoCustomBtn_->setVisible(!tpl.isValid());
+    if (!tpl.isValid()) {
+        tplPreviewLabel_->setText(
+            "还没有可用模板。\n\n"
+            "模板是全局的（与具体 PDF 无关）：在「自定义」里写好水印文字与样式，"
+            "点「存为模板...」即可保存，之后在这里选用。");
+        refreshScopeLabel();
+        refreshActionLabels();
+        return;
+    }
+
+    QStringList lines;
+    for (const auto& wm : tpl.watermarks) {
+        if (wm.text.empty()) continue;
+        lines << QString("  • %1%2")
+            .arg(QString::fromUtf8(wm.text.c_str()))
+            .arg(wm.selected ? QString() : QStringLiteral("（未勾选）"));
+    }
+    const WatermarkConfig st = tpl.style();
+    tplPreviewLabel_->setText(
+        QString("共 %1 条水印：\n%2\n\n样式：字号 %3pt · 倾斜 %4° · 深浅 %5% · 字体 %6%7%8")
+            .arg(lines.size())
+            .arg(lines.join("\n"))
+            .arg(st.fontSizePt)
+            .arg(st.rotationDegrees)
+            .arg(static_cast<int>(st.opacity * 100.0 + 0.5))
+            .arg(QString::fromUtf8(st.fontFamily.c_str()))
+            .arg(st.fontBold ? QStringLiteral(" · 加粗") : QString())
+            .arg(st.fontItalic ? QStringLiteral(" · 斜体") : QString()));
+    refreshScopeLabel();
+    refreshActionLabels();
+}
+
+int MainWindow::applyTemplateToAllFiles(const WatermarkTemplate& tpl) {
+    int applied = 0;
+    for (int r = 0; r < fileTable_->rowCount(); ++r) {
+        QTableWidgetItem* item = fileTable_->item(r, 3);
+        if (!item) continue;
+        const QString path = item->text();
+        if (path.isEmpty()) continue;
+        applyTemplateToFile(tpl, path);
+        ++applied;
+    }
+    if (!currentSelectedFile_.isEmpty()) {
+        loadWatermarksForSelectedFile();
+    }
+    return applied;
 }
 
 WatermarkTemplate MainWindow::currentUiAsTemplate(const QString& name) const {
@@ -1283,12 +1671,7 @@ void MainWindow::applyTemplateToCurrentUi(const WatermarkTemplate& tpl) {
     updateUiState(taskManager_.isRunning());
 }
 
-void MainWindow::onApplyTemplateToCurrent() {
-    const QString name = templateCombo_ ? templateCombo_->currentData().toString() : QString();
-    if (name.isEmpty()) {
-        QMessageBox::information(this, "提示", "请先在水印模板下拉框中选择一个模板。");
-        return;
-    }
+void MainWindow::loadTemplateByName(const QString& name) {
     const WatermarkTemplate* tpl = templateStore_.find(name);
     if (!tpl) {
         refreshTemplateCombo();
@@ -1299,45 +1682,13 @@ void MainWindow::onApplyTemplateToCurrent() {
         return;
     }
     applyTemplateToCurrentUi(*tpl);
-    statusLabel_->setText(QString("已套用模板「%1」到当前文件。").arg(name));
-}
-
-void MainWindow::onApplyTemplateToAll() {
-    const QString name = templateCombo_ ? templateCombo_->currentData().toString() : QString();
-    if (name.isEmpty()) {
-        QMessageBox::information(this, "提示", "请先在水印模板下拉框中选择一个模板。");
-        return;
-    }
-    const WatermarkTemplate* tpl = templateStore_.find(name);
-    if (!tpl) {
-        refreshTemplateCombo();
-        return;
-    }
-    if (fileTable_->rowCount() == 0) {
-        QMessageBox::warning(this, "提示", "请先添加至少一个 PDF 文件。");
-        return;
-    }
-
-    int applied = 0;
-    for (int r = 0; r < fileTable_->rowCount(); ++r) {
-        auto* item = fileTable_->item(r, 3);
-        if (!item) continue;
-        const QString path = item->text();
-        if (path.isEmpty()) continue;
-        applyTemplateToFile(*tpl, path);
-        ++applied;
-    }
-    if (!currentSelectedFile_.isEmpty()) {
-        loadWatermarksForSelectedFile();
-    }
-    updateUiState(taskManager_.isRunning());
-    statusLabel_->setText(QString("已套用模板「%1」到 %2 个文件，可直接点击「生成全部」批量固化。")
-        .arg(name).arg(applied));
+    statusLabel_->setText(QString("已把模板「%1」载入当前 PDF 的编辑区，可继续微调。").arg(name));
 }
 
 void MainWindow::onSaveAsTemplate() {
     if (currentSelectedFile_.isEmpty()) {
-        QMessageBox::warning(this, "提示", "请先选择一个 PDF 文件，模板将保存其当前水印文字与样式。");
+        QMessageBox::warning(this, "提示",
+            "请先在左侧选择一个 PDF 文件，并在「自定义模式」中编辑要保存的水印文字。");
         return;
     }
     bool ok = false;
@@ -1360,7 +1711,7 @@ void MainWindow::onSaveAsTemplate() {
     templateStore_.save();
     refreshTemplateCombo(name);
     updateUiState(taskManager_.isRunning());
-    statusLabel_->setText(QString("模板「%1」已保存。").arg(name));
+    statusLabel_->setText(QString("模板「%1」已保存（全局模板，可在「模板模式」中套用）。").arg(name));
 }
 
 void MainWindow::onManageTemplates() {

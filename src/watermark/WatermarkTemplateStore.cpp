@@ -1,6 +1,7 @@
 // PDFMark - JSON persistence for reusable watermark templates.
 #include "watermark/WatermarkTemplateStore.h"
 
+#include <QCoreApplication>
 #include <QDebug>
 #include <QDir>
 #include <QFile>
@@ -54,9 +55,16 @@ WatermarkTemplateStore::WatermarkTemplateStore(QString filePath)
     : filePath_(filePath.isEmpty() ? defaultFilePath() : std::move(filePath)) {}
 
 QString WatermarkTemplateStore::defaultFilePath() {
-    QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    // QStandardPaths only appends the application sub-directory when
+    // QCoreApplication::applicationName() is set. Without it every Qt app would
+    // share one file, so fall back to an explicit PDFMark directory.
+    QString dir;
+    if (!QCoreApplication::applicationName().isEmpty()) {
+        dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    }
     if (dir.isEmpty()) {
-        dir = QDir::homePath() + "/.pdfmark";
+        const QString base = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
+        dir = base.isEmpty() ? (QDir::homePath() + "/.pdfmark") : (base + "/PDFMark");
     }
     return dir + "/watermark_templates.json";
 }
