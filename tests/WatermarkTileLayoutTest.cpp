@@ -185,6 +185,23 @@ void testTileLayout() {
             page.fill(Qt::white);
             assert(WatermarkRenderer::applyWatermark(page, c));
 
+            // Stamp + tile diagnostics: a platform-specific renderer/stamp problem
+            // (e.g. a blank +90 deg stamp on Windows) is otherwise invisible in CI.
+            const WatermarkRenderer::Stamp stamp = WatermarkRenderer::createStamp(c);
+            int stampInk = 0;
+            for (int y = 0; y < stamp.image.height(); ++y) {
+                const QRgb* row = reinterpret_cast<const QRgb*>(stamp.image.constScanLine(y));
+                for (int x = 0; x < stamp.image.width(); ++x) {
+                    if (qAlpha(row[x]) != 0) ++stampInk;
+                }
+            }
+            std::cerr << "    stamp " << stamp.image.width() << "x" << stamp.image.height()
+                      << " inkPx=" << stampInk << " firstTile=("
+                      << static_cast<int>(layout.front().center.x()) << ","
+                      << static_cast<int>(layout.front().center.y()) << ") lastTile=("
+                      << static_cast<int>(layout.back().center.x()) << ","
+                      << static_cast<int>(layout.back().center.y()) << ")" << std::endl;
+
             const Gaps gaps = measureGaps(page);
             const double textH = QFontMetricsF(font).boundingRect(QString::fromStdString(c.text)).height();
             // A blank strip wider than half a glyph height reads as a margin; the
