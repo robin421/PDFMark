@@ -18,6 +18,8 @@
 #include "watermark/WatermarkRenderer.h"
 
 #include <cassert>
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <iostream>
 #include <numbers>
@@ -49,38 +51,53 @@ QFont fontFor(const WatermarkConfig& cfg) {
     return font;
 }
 
-// Axis-aligned bounds of a tile's rotated text box, in page coordinates.
-QRectF tileBox(const TileItem& t) {
+// Corners of a tile's rotated text box, in page coordinates.
+std::array<QPointF, 4> tileCorners(const TileItem& t) {
     const double rad = t.rotationDeg * (std::numbers::pi / 180.0);
-    const double c = std::fabs(std::cos(rad));
-    const double s = std::fabs(std::sin(rad));
+    const double c = std::cos(rad);
+    const double s = std::sin(rad);
     const double hw = t.textBounds.width() / 2.0;
     const double hh = t.textBounds.height() / 2.0;
-    const double ex = hw * c + hh * s;
-    const double ey = hw * s + hh * c;
-    return QRectF(t.center.x() - ex, t.center.y() - ey, 2 * ex, 2 * ey);
+    const QPointF local[4] = {{-hw, -hh}, {hw, -hh}, {hw, hh}, {-hw, hh}};
+    std::array<QPointF, 4> out;
+    for (int i = 0; i < 4; ++i) {
+        out[i] = QPointF(t.center.x() + local[i].x() * c - local[i].y() * s,
+                         t.center.y() + local[i].x() * s + local[i].y() * c);
+    }
+    return out;
 }
 
-// Does any tile box cross the given page border?
-bool borderCrossed(const std::vector<TileItem>& tiles, int w, int h, Side side) {
+// Distance from the given page border to the nearest tile box: 0 as soon as some
+// box touches or crosses it (the property that prevents a blank band), otherwise
+// how far the closest box stops short of it. Measured on the rotated rectangle,
+// not on its axis-aligned bounds — the bounds over-estimate coverage, which is
+// exactly the kind of error that lets a real gap slip through.
+double borderCoverageGap(const std::vector<TileItem>& tiles, int w, int h, Side side) {
+    double best = 1e18;
     for (const auto& t : tiles) {
-        const QRectF b = tileBox(t);
-        switch (side) {
-            case Side::Top:
-                if (b.top() <= 0.0 && b.bottom() >= 0.0 && b.right() >= 0.0 && b.left() <= w) return true;
-                break;
-            case Side::Bottom:
-                if (b.bottom() >= h && b.top() <= h && b.right() >= 0.0 && b.left() <= w) return true;
-                break;
-            case Side::Left:
-                if (b.left() <= 0.0 && b.right() >= 0.0 && b.bottom() >= 0.0 && b.top() <= h) return true;
-                break;
-            case Side::Right:
-                if (b.right() >= w && b.left() <= w && b.bottom() >= 0.0 && b.top() <= h) return true;
-                break;
+        const auto pts = tileCorners(t);
+        double lo = 1e18, hi = -1e18;      // extent along the border
+        double near_ = 1e18;               // closest approach to the border line
+        for (const auto& p : pts) {
+            switch (side) {
+                case Side::Top:
+                case Side::Bottom:
+                    lo = std::min(lo, p.x()); hi = std::max(hi, p.x());
+                    near_ = std::min(near_, (side == Side::Top) ? p.y() : h - p.y());
+                    break;
+                case Side::Left:
+                case Side::Right:
+                    lo = std::min(lo, p.y()); hi = std::max(hi, p.y());
+                    near_ = std::min(near_, (side == Side::Left) ? p.x() : w - p.x());
+                    break;
+            }
         }
+        // Only tiles that actually lie along this border can cover it.
+        const bool overlapsBorder = (lo <= (side == Side::Top || side == Side::Bottom ? w : h)) && (hi >= 0.0);
+        if (!overlapsBorder) continue;
+        best = std::min(best, std::max(0.0, near_));
     }
-    return false;
+    return best;
 }
 
 // Blank strip measured from each border to the outermost watermark pixel.
@@ -157,8 +174,8 @@ void testTileLayout() {
             assert(!layout.empty());
 
             for (Side side : {Side::Top, Side::Bottom, Side::Left, Side::Right}) {
-                if (!borderCrossed(layout, p.w, p.h, side)) {
-                    std::cerr << "  [" << p.name << " " << rot << " deg] no tile crosses the "
+                if (borderCoverageGap(layout, p.w, p.h, side) > 0.0) {
+                    std::cerr << "  [" << p.name << " " << rot << " deg] no tile box crosses the "
                               << sideName(side) << " border" << std::endl;
                     assert(false && "page border not covered by any tile box");
                 }
@@ -174,9 +191,10 @@ void testTileLayout() {
             // pre-fix bands (63 / 114 / 181 px) were far above that, the remaining
             // 11-13 px are the anti-aliasing tail of the outermost glyph.
             const int limit = static_cast<int>(textH / 2.0) + 2;
-            std::cout << "  " << p.name << " " << rot << " deg: tiles=" << layout.size()
-                      << " gaps t/b/l/r = " << gaps.top << "/" << gaps.bottom << "/"
-                      << gaps.left << "/" << gaps.right << " (limit " << limit << ")\n";
+            std::cerr << "  " << p.name << " " << rot << " deg: tiles=" << layout.size()
+                      << " textH=" << static_cast<int>(textH) << " ink gaps t/b/l/r = "
+                      << gaps.top << "/" << gaps.bottom << "/" << gaps.left << "/" << gaps.right
+                      << " (limit " << limit << ")" << std::endl;
             assert(gaps.top <= limit);
             assert(gaps.bottom <= limit);
             assert(gaps.left <= limit);
