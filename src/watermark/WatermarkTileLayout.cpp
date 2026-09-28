@@ -6,6 +6,15 @@
 
 namespace pdfmark {
 
+namespace {
+// Fraction of half a tile by which the outermost row/column is pulled inside the
+// page. The tile therefore CROSSES the border instead of merely touching it, so
+// the border strip stays covered even when the glyph's ink is inset from its
+// metric box (side bearing / antialiasing): with 0.5 (tiles centred on the
+// border) 38 px of a 300 DPI page still came out blank on one side.
+constexpr double kBorderInsetFactor = 0.25;
+} // namespace
+
 int WatermarkTileLayout::calculatePixelFontSize(int fontSizePt, int dpi) {
     if (fontSizePt <= 0) fontSizePt = 24;
     if (dpi <= 0) dpi = 200;
@@ -49,11 +58,10 @@ std::vector<TileItem> WatermarkTileLayout::calculateLayout(int widthPx,
     // Local centered text rectangle
     QRectF localRect(-textW / 2.0, -textH / 2.0, textW, textH);
 
-    // ── Grid extent, expressed in the rotated (u, v) frame ───────────────
-    //
+    // ── Grid extent, expressed in the rotated (u, v) frame ─────────────────
     // The grid is anchored on the page's own bounding box in (u, v) instead of a
-    // fixed [-diagonal, diagonal] window, and its last row/column is clamped
-    // exactly onto the far border.
+    // fixed [-diagonal, diagonal] window, and its outermost row/column is tied to
+    // the page borders (see kBorderInsetFactor below).
     //
     // Why: the row step is 3 x textH, so the deliberate gap between two rows can
     // land right on a page edge and leave a blank band along it. With the old
@@ -87,20 +95,36 @@ std::vector<TileItem> WatermarkTileLayout::calculateLayout(int widthPx,
     const double boxU = halfU * std::fabs(cosA) + halfV * std::fabs(sinA);
     const double boxV = halfU * std::fabs(sinA) + halfV * std::fabs(cosA);
 
-    int row = 0;
-    for (double v = vMin;; v += stepV, ++row) {
-        if (v > vMax) v = vMax;          // clamp the last row onto the far border
-        const bool lastRow = (v >= vMax);
+    // The outermost row/column is placed kBorderInsetFactor * halfTile INSIDE the
+    // page border, so its box crosses the border and the border strip carries
+    // watermark even when a glyph's ink is inset from its metric box.
+    const double uStart = uMin + halfU * kBorderInsetFactor;
+    const double uStop = std::max(uStart, uMax - halfU * kBorderInsetFactor);
+    const double vStart = vMin + halfV * kBorderInsetFactor;
+    const double vStop = std::max(vStart, vMax - halfV * kBorderInsetFactor);
 
-        // Stagger odd rows by half of u-step to interleave. The stagger only
-        // EXTENDS the row to the right, so the first column always stays on the
-        // near border and a staggered row can never open a gap at the page edge.
-        const double offsetU = (row % 2 != 0) ? (0.5 * stepU) : 0.0;
-        const double uEnd = uMax + offsetU;
+    // Tiles are DISTRIBUTED evenly between those two bounds instead of stepping by
+    // the nominal spacing and clamping the last one onto the border. The resulting
+    // spacing stays within a factor ~2 of the nominal step (round() keeps the error
+    // inside half a step) and the grid always ends exactly on the border. Clamping
+    // the closing tile is worse: it either stacks it almost on top of its neighbour
+    // or (when skipped for being close) re-opens the blank band — measured 61 px
+    // blank on a Letter @300 DPI page.
+    const int cols = std::max(1, static_cast<int>(std::lround((uStop - uStart) / stepU)));
+    const double stepCols = (uStop - uStart) / cols;
+    const int rowCount = std::max(1, static_cast<int>(std::lround((vStop - vStart) / stepV)));
+    const double stepRows = (vStop - vStart) / rowCount;
 
-        for (double u = uMin;; u += stepU) {
-            if (u + stepU > uEnd) u = std::max(u, uEnd);   // clamp onto the far border
-            const bool lastCol = (u >= uEnd);
+    for (int row = 0; row <= rowCount; ++row) {
+        const double v = vStart + row * stepRows;
+
+        // Stagger odd rows by half of u-step to interleave. The stagger is a pure
+        // shift of the whole row, so the near border stays covered by every row;
+        // the far one is covered by the rows that are not shifted.
+        const double offsetU = (row % 2 != 0) ? (-0.5 * stepCols) : 0.0;
+
+        for (int col = 0; col <= cols; ++col) {
+            const double u = uStart + col * stepCols + offsetU;
 
             // Transform from rotated (u, v) coordinate to page (x, y)
             const double x = halfW + u * cosA - v * sinA;
@@ -115,9 +139,7 @@ std::vector<TileItem> WatermarkTileLayout::calculateLayout(int widthPx,
                 item.textBounds = localRect;
                 tiles.push_back(item);
             }
-            if (lastCol) break;
         }
-        if (lastRow) break;
     }
 
     return tiles;
