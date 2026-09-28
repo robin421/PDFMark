@@ -2,6 +2,7 @@
 #include "watermark/WatermarkRenderer.h"
 #include "watermark/WatermarkTileLayout.h"
 #include <QPainter>
+#include <QTransform>
 #include <QFontMetricsF>
 #include <QColor>
 #include <QString>
@@ -48,35 +49,39 @@ WatermarkRenderer::Stamp WatermarkRenderer::createStamp(const WatermarkConfig& c
     const double paddedW = textW + pad * 2.0;
     const double paddedH = textH + pad * 2.0;
 
-    // Compute rotated bounding box
-    const double rad = config.rotationDegrees * (std::numbers::pi / 180.0);
-    const double cosA = std::abs(std::cos(rad));
-    const double sinA = std::abs(std::sin(rad));
-
-    int rotW = static_cast<int>(std::ceil(paddedW * cosA + paddedH * sinA)) + 4;
-    int rotH = static_cast<int>(std::ceil(paddedW * sinA + paddedH * cosA)) + 4;
-    if (rotW % 2 != 0) rotW++;
-    if (rotH % 2 != 0) rotH++;
-
-    // ARGB32_Premultiplied offers optimal blending performance on Qt
-    QImage stampImage(rotW, rotH, QImage::Format_ARGB32_Premultiplied);
-    stampImage.fill(Qt::transparent);
-
+    // Draw the text UPRIGHT and rotate the PIXELS afterwards instead of drawing
+    // through a rotated QPainter.
+    //
+    // Why: rotated text rendering is not reliable on every platform. On Windows
+    // the +90 degree stamp came out COMPLETELY blank (measured: 0 non-transparent
+    // pixels, while -90 degree was fine), so a +90 degree watermark painted nothing
+    // at all. Rotating the raster gives the same result everywhere ("measure the
+    // stamp, not the painter") and still keeps the per-tile work down to a single
+    // pre-rotated blit.
+    const int flatW = static_cast<int>(std::ceil(paddedW));
+    const int flatH = static_cast<int>(std::ceil(paddedH));
+    QImage flat(flatW, flatH, QImage::Format_ARGB32_Premultiplied);
+    flat.fill(Qt::transparent);
     {
-        QPainter sp(&stampImage);
-        sp.setRenderHint(QPainter::Antialiasing, true);
-        sp.setRenderHint(QPainter::TextAntialiasing, true);
-        sp.setFont(font);
-        sp.setPen(color);
-
-        sp.translate(rotW / 2.0, rotH / 2.0);
-        sp.rotate(config.rotationDegrees);
-        QRectF textRect(-textW / 2.0, -textH / 2.0, textW, textH);
-        sp.drawText(textRect, Qt::AlignCenter, qtext);
-        sp.end();
+        QPainter fp(&flat);
+        fp.setRenderHint(QPainter::Antialiasing, true);
+        fp.setRenderHint(QPainter::TextAntialiasing, true);
+        fp.setFont(font);
+        fp.setPen(color);
+        fp.drawText(QRectF(pad, pad, textW, textH), Qt::AlignCenter, qtext);
+        fp.end();
     }
 
-    stamp.image = std::move(stampImage);
+    if (std::abs(config.rotationDegrees) < 1e-9) {
+        stamp.image = std::move(flat);
+    } else {
+        stamp.image = flat.transformed(QTransform().rotate(config.rotationDegrees),
+                                       Qt::SmoothTransformation);
+    }
+    if (stamp.image.format() != QImage::Format_ARGB32_Premultiplied) {
+        stamp.image.convertTo(QImage::Format_ARGB32_Premultiplied);
+    }
+
     return stamp;
 }
 
