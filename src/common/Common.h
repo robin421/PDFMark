@@ -80,9 +80,17 @@ inline int pointsToPixels(double points, int dpi) {
     return static_cast<int>((points * dpi) / 72.0);
 }
 // Replaces characters that are illegal in a path component (or that would be
-// interpreted as a separator) with '_', then trims surrounding spaces and
-// underscores. Returns an EMPTY string when nothing usable is left, which lets
-// callers distinguish "not set" from the "watermark" fallback below.
+// interpreted as a separator) with '_', then trims surrounding spaces,
+// underscores and trailing dots. Returns an EMPTY string when nothing usable is
+// left, which lets callers distinguish "not set" from the "watermark" fallback
+// below.
+//
+// Trailing dots are trimmed because Windows silently drops them when a file or
+// directory is CREATED ("CONCUR..." -> "CONCUR") but does NOT drop them when
+// the same name is later used as a path prefix: opening
+// "CONCUR.../out.tmp" fails with ENOENT. Derived template names of long
+// watermark texts always end with "...", so a trailing dot in this sanitizer
+// made every such output fail on Windows.
 inline std::string sanitizeFilenameOrEmpty(const std::string& raw) {
     std::string clean;
     clean.reserve(raw.size());
@@ -99,7 +107,10 @@ inline std::string sanitizeFilenameOrEmpty(const std::string& raw) {
     if (start == std::string::npos) {
         return std::string();
     }
-    size_t end = clean.find_last_not_of(" _");
+    size_t end = clean.find_last_not_of(" ._");
+    if (end == std::string::npos || end < start) {
+        return std::string();
+    }
     return clean.substr(start, end - start + 1);
 }
 

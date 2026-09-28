@@ -52,6 +52,19 @@ void testCommonUtilities() {
     assert(sanitizeFilenameOrEmpty("___") == "");
     assert(sanitizeFilenameOrEmpty("///") == "");
 
+    // 7. Trailing dots/spaces are trimmed: Windows drops them when CREATING a
+    //    name but not when the same name is reused as a path prefix, so a
+    //    derived template name ending in "..." (any watermark text > 6 chars)
+    //    used to make every output fail on Windows.
+    assert(sanitizeFilename("内部文件-李...") == "内部文件-李");
+    assert(sanitizeFilenameOrEmpty("内部文件-李...") == "内部文件-李");
+    assert(sanitizeFilename("报告...  ") == "报告");
+    assert(sanitizeFilenameOrEmpty("报告..") == "报告");
+    assert(sanitizeFilenameOrEmpty("...") == "");
+    assert(sanitizeFilenameOrEmpty(" . ") == "");
+    assert(sanitizeFilename("...") == "watermark");    // unusable -> fallback
+    assert(sanitizeFilename(".hidden") == ".hidden");  // leading dot is kept
+
     std::cout << "[PASS] testCommonUtilities\n";
 }
 

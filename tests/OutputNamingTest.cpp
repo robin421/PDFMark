@@ -295,6 +295,24 @@ void testOutputNaming() {
         assert(onDisk.count("sample_input_红色_1.pdf") == 1);
     }
 
+    // ── Windows: a folder name ending in dots is unusable ────────────────
+    // Derived template names of watermark texts longer than 6 characters always
+    // end with "..." (e.g. "内部文件-李..."). Win32 strips those dots when
+    // CREATING the directory but not when the same name is reused as a path
+    // prefix ("...\内部文件-李...\~x.tmp" -> ENOENT), so on Windows every such
+    // output failed with "Failed to open output file". Regression guard.
+    {
+        const fs::path outDir = workDir / "out_trailing_dots";
+        WatermarkTemplate tpl = makeTemplate("内部文件-李...", "内部文件-李四", "", "");
+        assert(templateNameFromConfigs(tpl.watermarks) == "内部文件-李...");   // what the UI derives
+
+        const auto got = runBatch(inputPdf, {tpl}, outDir);
+        assert(got.size() == 1);
+        expectAllSucceeded(got);
+        assert(pathToString(got[0].outputPath.parent_path().filename()) == "内部文件-李");
+        assert(filesIn(outDir / stringToPath("内部文件-李")).count("sample_input.pdf") == 1);
+    }
+
     // ── Regression: no outputFolder => folder == template name (1.4.0 rule) ─
     {
         const fs::path outDir = workDir / "out_legacy";
