@@ -64,6 +64,14 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
+### 产物来源（重要）
+
+- **Windows 发行包只能来自 GitHub Actions**（`windows-build.yml` / `windows-release.yml`），
+  本机 macOS 无法交叉编译 MSVC。
+- 本地 `dist/` 目录只保存**本机 macOS 打包产物**（由 `scripts/package-macos.sh` 生成）。
+  **不要直接打包 `dist/` 目录去分发**——它不含 Windows 包，且其中的 Windows zip 可能是历史遗留的旧版本。
+  正式分发一律以 GitHub Release 页面上的资产为准。
+
 ### 打包 Windows 发行版
 
 ```powershell
