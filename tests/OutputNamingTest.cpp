@@ -139,12 +139,13 @@ void expectAllSucceeded(const std::vector<FileResult>& results) {
 // this stays readable even when a test-built path is wrong for the platform).
 void dumpTree(const fs::path& root) {
     std::error_code ec;
-    std::printf("  [DIAG] tree of %s (dir=%d):\n", pathToString(root).c_str(),
-                static_cast<int>(fs::is_directory(root, ec)));
+    // std::cerr + std::endl: assert() aborts, which drops buffered stdout.
+    std::cerr << "  [DIAG] tree of " << pathToString(root)
+              << " (dir=" << static_cast<int>(fs::is_directory(root, ec)) << ")" << std::endl;
     if (!fs::is_directory(root, ec)) return;
     for (const auto& e : fs::recursive_directory_iterator(root, ec)) {
-        std::printf("         %s%s\n", e.is_directory() ? "[d] " : "    ",
-                    pathToString(e.path()).c_str());
+        std::cerr << "         " << (e.is_directory() ? "[d] " : "    ")
+                  << pathToString(e.path()) << std::endl;
     }
 }
 

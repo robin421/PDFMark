@@ -144,12 +144,14 @@ void testMultiWatermarkBatch() {
     assert(results.size() == configs.size());
     for (const auto& r : results) {
         if (!r.success) {
-            std::printf("  [FAIL] %s -> %s : %s\n",
-                        pathToString(r.outputPath).c_str(), pathToString(r.inputPath).c_str(),
-                        r.errorMessage.c_str());
+            // std::cerr + std::endl: assert() calls abort(), which discards
+            // whatever printf/iostream had buffered.
+            std::cerr << "  [FAIL] out=" << pathToString(r.outputPath)
+                      << " in=" << pathToString(r.inputPath)
+                      << " err=" << r.errorMessage << std::endl;
             for (const auto& e : fs::recursive_directory_iterator(workDir, ec)) {
-                std::printf("  [DIAG] %s%s\n", e.is_directory() ? "[d] " : "    ",
-                            pathToString(e.path()).c_str());
+                std::cerr << "  [DIAG] " << (e.is_directory() ? "[d] " : "    ")
+                          << pathToString(e.path()) << std::endl;
             }
         }
         assert(r.success);

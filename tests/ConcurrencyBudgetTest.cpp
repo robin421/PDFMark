@@ -102,8 +102,10 @@ RunOutcome runBatch(const fs::path& workDir,
             if (r.success) {
                 outcome.successCount++;
             } else {
-                std::cout << "  [FAIL] " << pathToString(r.outputPath) << " <- "
-                          << pathToString(r.inputPath) << " : " << r.errorMessage << "\n";
+                // std::cerr + std::endl so the message survives assert()/abort().
+                std::cerr << "  [FAIL] out=" << pathToString(r.outputPath)
+                          << " in=" << pathToString(r.inputPath)
+                          << " err=" << r.errorMessage << std::endl;
             }
         }
         outcome.finished = true;
