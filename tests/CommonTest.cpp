@@ -42,6 +42,16 @@ void testCommonUtilities() {
     assert(sanitizeFilename("   ///:::***???   ") == "watermark");
     assert(sanitizeFilename("") == "watermark");
 
+    // 6. sanitizeFilenameOrEmpty: same cleaning, but "nothing left" stays empty
+    //    so optional path parts (file-name suffixes) can mean "not set" instead
+    //    of silently turning into a folder/file called "watermark".
+    assert(sanitizeFilenameOrEmpty("Confidential") == "Confidential");
+    assert(sanitizeFilenameOrEmpty("红色/2026") == "红色_2026");
+    assert(sanitizeFilenameOrEmpty("  ") == "");
+    assert(sanitizeFilenameOrEmpty("") == "");
+    assert(sanitizeFilenameOrEmpty("___") == "");
+    assert(sanitizeFilenameOrEmpty("///") == "");
+
     std::cout << "[PASS] testCommonUtilities\n";
 }
 

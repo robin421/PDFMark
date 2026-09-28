@@ -89,6 +89,9 @@ private:
     int checkedTemplateCount() const;
     void setTemplateChecked(int row, bool on);
     bool isTemplateCheckedAt(int row) const;
+    // Status-bar text after saving/updating a template (mentions a merged output
+    // folder when the template writes into another template's folder).
+    QString templateSavedMessage(const WatermarkTemplate& tpl, const QString& verb) const;
 
     // ── Batch ───────────────────────────────────────────────────────────
     std::vector<TaskManager::FileSubtask> buildSubtasks(BatchScope scope);

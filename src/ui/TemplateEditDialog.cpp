@@ -3,6 +3,7 @@
 #include "watermark/WatermarkRenderer.h"
 
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QFontComboBox>
 #include <QFrame>
@@ -22,6 +23,10 @@ namespace pdfmark {
 
 namespace {
 
+// First entry of the folder picker: keep the historical "folder == template
+// name" behaviour (stored as an EMPTY outputFolder, so a later rename moves it).
+const QString kDefaultFolderOption = QStringLiteral("（默认）与模板名相同");
+
 QString depthHintText(int percent) {
     if (percent <= 8) return QStringLiteral("极浅");
     if (percent <= 12) return QStringLiteral("偏浅");
@@ -33,8 +38,10 @@ QString depthHintText(int percent) {
 } // namespace
 
 TemplateEditDialog::TemplateEditDialog(const WatermarkTemplate& initial, bool creating,
+                                       const QStringList& takenNames,
+                                       const QStringList& knownFolders,
                                        QWidget* parent)
-    : QDialog(parent), result_(initial) {
+    : QDialog(parent), result_(initial), takenNames_(takenNames), knownFolders_(knownFolders) {
     style0_ = initial.watermarks.empty() ? WatermarkConfig{} : initial.watermarks.front();
     buildUi(creating);
     applyStyleToUi(style0_);
@@ -48,6 +55,17 @@ TemplateEditDialog::TemplateEditDialog(const WatermarkTemplate& initial, bool cr
     }
     if (!initial.name.empty()) {
         nameEdit_->setText(QString::fromUtf8(initial.name.c_str()));
+    }
+    if (!initial.variantSuffix.empty()) {
+        variantEdit_->setText(QString::fromUtf8(initial.variantSuffix.c_str()));
+    }
+    // Only an EXPLICIT folder is pre-selected; an implicit one (folder == name)
+    // stays on the default entry so renaming the template also moves its folder.
+    if (!initial.outputFolder.empty()) {
+        const QString folder = QString::fromUtf8(initial.outputFolder.c_str());
+        const int idx = folderCombo_->findText(folder);
+        if (idx >= 0) folderCombo_->setCurrentIndex(idx);
+        else folderCombo_->setEditText(folder);
     }
     refreshPreview();
 }
@@ -72,10 +90,52 @@ void TemplateEditDialog::buildUi(bool creating) {
     nameRow->setSpacing(8);
     nameRow->addWidget(new QLabel(QStringLiteral("模板名称:"), this));
     nameEdit_ = new QLineEdit(this);
+    // Object names make the dialog drivable from tests / UI automation.
+    nameEdit_->setObjectName(QStringLiteral("templateNameEdit"));
     nameEdit_->setPlaceholderText(QStringLiteral("留空则自动使用水印文字（超出 6 字截断）"));
-    nameEdit_->setToolTip(QStringLiteral("模板名会作为输出子目录名（例如用公司名）"));
+    nameEdit_->setToolTip(QStringLiteral(
+        "模板在列表里的名字。默认也作为输出子目录名，"
+        "除非在下方指定了「输出文件夹」。\n"
+        "与已有模板重名时会自动变成「名字 (2)」，不会覆盖。"));
     nameRow->addWidget(nameEdit_, 1);
     left->addLayout(nameRow);
+
+    // ── Output naming: which folder it lands in + how the file is named ──
+    auto* outGroup = new QGroupBox(QStringLiteral("输出（文件夹 / 文件名）"), this);
+    auto* outGrid = new QGridLayout(outGroup);
+    outGrid->setContentsMargins(10, 12, 10, 10);
+    outGrid->setHorizontalSpacing(10);
+    outGrid->setVerticalSpacing(8);
+
+    outGrid->addWidget(new QLabel(QStringLiteral("输出文件夹:"), outGroup), 0, 0);
+    folderCombo_ = new QComboBox(outGroup);
+    folderCombo_->setObjectName(QStringLiteral("templateFolderCombo"));
+    folderCombo_->setEditable(true);
+    folderCombo_->insertItem(0, kDefaultFolderOption);
+    if (!knownFolders_.isEmpty()) folderCombo_->insertSeparator(1);
+    folderCombo_->addItems(knownFolders_);
+    folderCombo_->setToolTip(QStringLiteral(
+        "默认（第一项）= 用模板名作子目录。\n"
+        "选择或填写一个已有的文件夹 = 与它合并，\n"
+        "多个「文字相同、样式不同」的模板就能落到同一个目录。"));
+    outGrid->addWidget(folderCombo_, 0, 1);
+
+    outGrid->addWidget(new QLabel(QStringLiteral("变体后缀:"), outGroup), 1, 0);
+    variantEdit_ = new QLineEdit(outGroup);
+    variantEdit_->setObjectName(QStringLiteral("templateVariantEdit"));
+    variantEdit_->setPlaceholderText(QStringLiteral("可留空，如「红色」「斜体」"));
+    variantEdit_->setToolTip(QStringLiteral(
+        "拼到输出文件名后面，用于在同一文件夹内区分不同样式：\n"
+        "报告.pdf → 报告_红色.pdf\n\n"
+        "留空时若文件名仍冲突，会自动加 _1 / _2。"));
+    outGrid->addWidget(variantEdit_, 1, 1);
+
+    outputHint_ = new QLabel(outGroup);
+    outputHint_->setObjectName(QStringLiteral("templateOutputHint"));
+    outputHint_->setWordWrap(true);
+    outputHint_->setStyleSheet("color:#555555; font-size:11px;");
+    outGrid->addWidget(outputHint_, 2, 0, 1, 2);
+    left->addWidget(outGroup);
 
     auto* textGroup = new QGroupBox(QStringLiteral("水印文字（同一模板内可多行，共用一套样式）"), this);
     auto* textLayout = new QVBoxLayout(textGroup);
@@ -204,6 +264,11 @@ void TemplateEditDialog::buildUi(bool creating) {
     });
     connect(boldCheck_, &QCheckBox::toggled, this, [this](bool) { refreshPreview(); });
     connect(italicCheck_, &QCheckBox::toggled, this, [this](bool) { refreshPreview(); });
+    // Naming widgets do not change the rendered preview, only the result hint.
+    connect(nameEdit_, &QLineEdit::textChanged, this, [this](const QString&) { refreshOutputHint(); });
+    connect(variantEdit_, &QLineEdit::textChanged, this, [this](const QString&) { refreshOutputHint(); });
+    connect(folderCombo_, &QComboBox::currentTextChanged, this,
+            [this](const QString&) { refreshOutputHint(); });
 }
 
 void TemplateEditDialog::addTextRow(const QString& text, int insertAt) {
@@ -213,6 +278,7 @@ void TemplateEditDialog::addTextRow(const QString& text, int insertAt) {
     h->setSpacing(6);
 
     auto* edit = new QLineEdit(row);
+    edit->setObjectName(QStringLiteral("watermarkTextEdit"));
     edit->setText(text);
     edit->setPlaceholderText(QStringLiteral("水印文字（例如：甲公司 机密）"));
     h->addWidget(edit, 1);
@@ -289,6 +355,7 @@ void TemplateEditDialog::applyStyleToUi(const WatermarkConfig& style) {
 
 void TemplateEditDialog::refreshPreview() {
     if (!previewLabel_) return;
+    refreshOutputHint();   // same set of events drives both
     const std::vector<WatermarkConfig> lines = linesFromUi();
     if (lines.empty()) {
         previewLabel_->setPixmap(QPixmap());
@@ -306,9 +373,61 @@ QString TemplateEditDialog::autoName() const {
     return QString::fromUtf8(n.c_str());
 }
 
+QString TemplateEditDialog::resolvedName() const {
+    return QString::fromUtf8(resolveNaming().name.c_str());
+}
+
+std::string TemplateEditDialog::resolvedFolder() const {
+    return resolveNaming().outputFolder;
+}
+
+// All naming decisions (blank name, collisions, merge folder) live in
+// resolveTemplateNaming() so they are unit-testable without any widget.
+TemplateNaming TemplateEditDialog::resolveNaming() const {
+    std::vector<std::string> taken;
+    taken.reserve(static_cast<size_t>(takenNames_.size()));
+    for (const auto& n : takenNames_) taken.push_back(n.toUtf8().toStdString());
+
+    const std::string typedFolder = folderCombo_
+        ? folderCombo_->currentText().trimmed().toUtf8().toStdString()
+        : std::string();
+    // The "default" entry is a UI-only placeholder, not a folder name.
+    const std::string folder = (typedFolder == kDefaultFolderOption.toUtf8().toStdString())
+        ? std::string() : typedFolder;
+
+    return resolveTemplateNaming(nameEdit_->text().trimmed().toUtf8().toStdString(),
+                                 linesFromUi(), taken, folder);
+}
+
+void TemplateEditDialog::refreshOutputHint() {
+    if (!outputHint_) return;
+
+    const QString typedName = nameEdit_->text().trimmed();
+    const QString base = typedName.isEmpty() ? autoName() : typedName;
+    if (base.isEmpty()) {
+        outputHint_->setText(QStringLiteral("填写水印文字后，这里会显示输出位置与文件名。"));
+        return;
+    }
+
+    const QString finalName = resolvedName();
+    const QString folder = QString::fromUtf8(resolvedFolder().c_str());
+    const QString effective = folder.isEmpty() ? finalName : folder;
+    const QString suffix = variantEdit_->text().trimmed();
+
+    QString hint = QStringLiteral("输出到「%1/」，文件名后缀 %2")
+        .arg(effective, suffix.isEmpty() ? QStringLiteral("（无）") : QString("_%1").arg(suffix));
+    if (finalName != base) {
+        hint.prepend(QStringLiteral("「%1」已存在 → 另存为「%2」，与它共用同一文件夹。\n")
+                         .arg(base, finalName));
+    }
+    outputHint_->setText(hint);
+}
+
 void TemplateEditDialog::accept() {
     WatermarkTemplate tpl;
-    tpl.name = nameEdit_->text().trimmed().toUtf8().toStdString();
+    tpl.name = resolvedName().toUtf8().toStdString();
+    tpl.variantSuffix = variantEdit_->text().trimmed().toUtf8().toStdString();
+    tpl.outputFolder = resolvedFolder();
     tpl.watermarks = linesFromUi();
 
     if (!normalizeTemplate(tpl)) {

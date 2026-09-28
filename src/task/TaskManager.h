@@ -121,7 +121,17 @@ private:
                               int totalUnits,
                               std::shared_ptr<std::atomic<int>> lastReportedPct);
 
-    fs::path outputPathFor(const fs::path& input, const std::string& watermarkText = "", int duplicateIndex = 0) const;
+    // Output path = <output dir | source dir>/<sanitized folder>/<name>.pdf.
+    //
+    // `folder` is the template's effective folder (WatermarkTemplate::folderName()),
+    // `variantSuffix` an optional file-name suffix that keeps several styles of
+    // the same watermark text apart inside one folder; a blank suffix keeps the
+    // plain "<source>.pdf" name. `duplicateIndex` > 0 appends "_2"/"_3" when the
+    // result still collides (blank or identical suffixes).
+    fs::path outputPathFor(const fs::path& input,
+                           const std::string& folder,
+                           const std::string& variantSuffix = std::string(),
+                           int duplicateIndex = 0) const;
 
     // Sliding-window synchronisation between the supervisor thread (which
     // submits jobs) and the pool workers (which complete them).

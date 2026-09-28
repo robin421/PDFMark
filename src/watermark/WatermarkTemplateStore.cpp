@@ -15,7 +15,7 @@ namespace pdfmark {
 
 namespace {
 
-constexpr int kSchemaVersion = 1;
+constexpr int kSchemaVersion = 2;   // 2 adds variantSuffix + outputFolder (v1 still loads)
 
 QJsonObject configToJson(const WatermarkConfig& cfg) {
     QJsonObject o;
@@ -94,14 +94,25 @@ bool WatermarkTemplateStore::load() {
         const QJsonObject obj = item.toObject();
         WatermarkTemplate tpl;
         tpl.name = obj.value("name").toString().toUtf8().toStdString();
+        // Optional since schema 2: a v1 file simply yields empty strings, which
+        // mean "use the template name" / "no file-name suffix".
+        tpl.variantSuffix = obj.value("variantSuffix").toString().toUtf8().toStdString();
+        tpl.outputFolder = obj.value("outputFolder").toString().toUtf8().toStdString();
         const QJsonArray wms = obj.value("watermarks").toArray();
         tpl.watermarks.reserve(static_cast<size_t>(wms.size()));
         for (const auto& w : wms) {
             tpl.watermarks.push_back(configFromJson(w.toObject()));
         }
-        if (!tpl.name.empty()) {
-            templates_.push_back(std::move(tpl));
+        if (tpl.name.empty()) continue;
+        // Names are the lookup key (find/remove/rename all match on it), so a
+        // hand-edited file with duplicates would show two list rows while only
+        // the first is ever reachable. Keep the first, drop the rest.
+        if (find(QString::fromUtf8(tpl.name.c_str())) != nullptr) {
+            qWarning() << "WatermarkTemplateStore: duplicate template name dropped:"
+                       << QString::fromUtf8(tpl.name.c_str());
+            continue;
         }
+        templates_.push_back(std::move(tpl));
     }
     return true;
 }
@@ -116,6 +127,14 @@ bool WatermarkTemplateStore::save() const {
     for (const auto& tpl : templates_) {
         QJsonObject obj;
         obj["name"] = QString::fromUtf8(tpl.name.c_str());
+        // Only persisted when actually set: keeps v1-shaped files readable by
+        // older builds and avoids noise for the common case.
+        if (!tpl.variantSuffix.empty()) {
+            obj["variantSuffix"] = QString::fromUtf8(tpl.variantSuffix.c_str());
+        }
+        if (!tpl.outputFolder.empty()) {
+            obj["outputFolder"] = QString::fromUtf8(tpl.outputFolder.c_str());
+        }
         QJsonArray wms;
         for (const auto& cfg : tpl.watermarks) {
             wms.append(configToJson(cfg));
@@ -175,6 +194,23 @@ bool WatermarkTemplateStore::rename(const QString& oldName, const QString& newNa
     if (!target) return false;
     target->name = newName.toUtf8().toStdString();
     return true;
+}
+
+QStringList WatermarkTemplateStore::names() const {
+    QStringList out;
+    out.reserve(static_cast<int>(templates_.size()));
+    for (const auto& tpl : templates_) out << QString::fromUtf8(tpl.name.c_str());
+    return out;
+}
+
+QStringList WatermarkTemplateStore::folderNames() const {
+    QStringList out;
+    for (const auto& tpl : templates_) {
+        const QString folder = QString::fromUtf8(tpl.folderName().c_str());
+        if (!folder.isEmpty() && !out.contains(folder)) out << folder;
+    }
+    out.sort(Qt::CaseInsensitive);
+    return out;
 }
 
 const WatermarkTemplate* WatermarkTemplateStore::find(const QString& name) const {

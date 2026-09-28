@@ -13,12 +13,23 @@ add_executable(pdfmark_tests
     WatermarkTemplateTest.cpp
     WorkloadEstimateTest.cpp
     ConcurrencyBudgetTest.cpp
+    OutputNamingTest.cpp
+    TemplateDialogTest.cpp
 )
 
 target_link_libraries(pdfmark_tests PRIVATE
     pdfmark_core
     Qt6::Test
 )
+# Release/RelWithDebInfo/MinSizeRel define NDEBUG, which turns every assert() in
+# this suite into a no-op — i.e. all checks below were silently disabled in the
+# Release CI build. Undefine it for the test binaries so a regression really
+# fails the build. `-U`/`/U` is applied after the config flags, so it wins.
+if(MSVC)
+    target_compile_options(pdfmark_tests PRIVATE /UNDEBUG)
+else()
+    target_compile_options(pdfmark_tests PRIVATE -UNDEBUG)
+endif()
 if(MSVC)
     target_compile_options(pdfmark_tests PRIVATE
         "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:/O2;/GL;/Oi;/Gy>")
@@ -65,6 +76,12 @@ add_test(NAME WorkloadEstimateTest COMMAND pdfmark_tests --test WorkloadEstimate
 
 # Batch concurrency must never exceed the configured window
 add_test(NAME ConcurrencyBudgetTest COMMAND pdfmark_tests --test ConcurrencyBudget)
+
+# Output grouping / file naming (same text + different styles -> one folder)
+add_test(NAME OutputNamingTest COMMAND pdfmark_tests --test OutputNaming)
+
+# Template editor: sibling names + auto-merged output folder (offscreen UI test)
+add_test(NAME TemplateDialogTest COMMAND pdfmark_tests --test TemplateDialog)
 # Multi-watermark batch test
 
 # AutoUpdater test
@@ -75,6 +92,11 @@ target_link_libraries(pdfmark_updater_test PRIVATE
     pdfmark_core
     Qt6::Test
 )
+if(MSVC)
+    target_compile_options(pdfmark_updater_test PRIVATE /UNDEBUG)
+else()
+    target_compile_options(pdfmark_updater_test PRIVATE -UNDEBUG)
+endif()
 if(MSVC)
     target_compile_options(pdfmark_updater_test PRIVATE
         "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:/O2;/GL;/Oi;/Gy>")

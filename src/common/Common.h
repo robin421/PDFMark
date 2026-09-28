@@ -13,9 +13,9 @@
 #include <vector>
 #include <QString>
 #include <QMetaType>
-#define PDFMARK_VERSION "1.4.0"
+#define PDFMARK_VERSION "1.5.0"
 #define PDFMARK_VERSION_MAJOR 1
-#define PDFMARK_VERSION_MINOR 4
+#define PDFMARK_VERSION_MINOR 5
 #define PDFMARK_VERSION_PATCH 0
 
 namespace pdfmark {
@@ -79,7 +79,11 @@ inline int dpiFromResolution(RasterResolution r) {
 inline int pointsToPixels(double points, int dpi) {
     return static_cast<int>((points * dpi) / 72.0);
 }
-inline std::string sanitizeFilename(const std::string& raw) {
+// Replaces characters that are illegal in a path component (or that would be
+// interpreted as a separator) with '_', then trims surrounding spaces and
+// underscores. Returns an EMPTY string when nothing usable is left, which lets
+// callers distinguish "not set" from the "watermark" fallback below.
+inline std::string sanitizeFilenameOrEmpty(const std::string& raw) {
     std::string clean;
     clean.reserve(raw.size());
     for (char ch : raw) {
@@ -93,11 +97,17 @@ inline std::string sanitizeFilename(const std::string& raw) {
     }
     size_t start = clean.find_first_not_of(" _");
     if (start == std::string::npos) {
-        return "watermark";
+        return std::string();
     }
     size_t end = clean.find_last_not_of(" _");
-    std::string trimmed = clean.substr(start, end - start + 1);
-    return trimmed.empty() ? "watermark" : trimmed;
+    return clean.substr(start, end - start + 1);
+}
+
+// Path component with a guaranteed non-empty result: blank or fully-sanitized
+// input degrades to "watermark", so a folder/file name never becomes empty.
+inline std::string sanitizeFilename(const std::string& raw) {
+    std::string clean = sanitizeFilenameOrEmpty(raw);
+    return clean.empty() ? std::string("watermark") : clean;
 }
 
 // Generic PDF error with human-readable detail.

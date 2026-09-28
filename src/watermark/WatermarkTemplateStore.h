@@ -3,6 +3,7 @@
 
 #include "watermark/WatermarkTemplate.h"
 #include <QString>
+#include <QStringList>
 #include <vector>
 
 namespace pdfmark {
@@ -23,6 +24,13 @@ public:
     void setFilePath(const QString& path) { filePath_ = path; }
 
     const std::vector<WatermarkTemplate>& templates() const { return templates_; }
+
+    // All template names (names are the store's uniqueness key).
+    QStringList names() const;
+
+    // Effective output folders (WatermarkTemplate::folderName()) of every
+    // template, de-duplicated. Feeds the "merge into an existing folder" picker.
+    QStringList folderNames() const;
 
     // Load from disk. Returns false on missing/corrupt file (templates are then
     // cleared and a warning is logged) — never throws.

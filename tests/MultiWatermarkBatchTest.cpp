@@ -9,6 +9,7 @@
 #include "pdf/PdfWriter.h"
 #include "task/TaskManager.h"
 #include "watermark/WatermarkConfig.h"
+#include "watermark/WatermarkTemplate.h"
 
 #include <QImage>
 #include <QPainter>
@@ -50,6 +51,17 @@ fs::path createTestPdf(const fs::path& outPath) {
     return outPath;
 }
 
+// Output sub-directory produced by the legacy single-config path
+// (TaskManager::setWatermarkConfigs()): it wraps each config in a one-line
+// template, so the folder is the DERIVED template name — the first watermark line
+// truncated to 6 characters — sanitized, NOT the raw text. (Since 1.5.0 the
+// folder is WatermarkTemplate::folderName(), which defaults to that same name.)
+std::string outputFolderForText(const std::string& text) {
+    WatermarkConfig cfg;
+    cfg.text = text;
+    return sanitizeFilename(templateNameFromConfigs({cfg}));
+}
+
 } // namespace
 
 void testMultiWatermarkBatch() {
@@ -87,11 +99,12 @@ void testMultiWatermarkBatch() {
         configs.push_back(cfg);
     }
 
-    // Sanitized names organized in per-watermark subdirectories, files keep original PDF name
+    // Sanitized derived names organized in per-watermark subdirectories, files
+    // keep the original PDF name.
     std::vector<fs::path> expectedOutputs = {
-        workDir / "机密-张三" / "sample_input.pdf",
-        workDir / "内部文件-李四" / "sample_input.pdf",
-        workDir / "部门_审核_王五" / "sample_input.pdf",
+        workDir / stringToPath(outputFolderForText("机密-张三")) / "sample_input.pdf",
+        workDir / stringToPath(outputFolderForText("内部文件-李四")) / "sample_input.pdf",
+        workDir / stringToPath(outputFolderForText("部门/审核*王五?")) / "sample_input.pdf",
     };
 
     // Drive the TaskManager synchronously.
@@ -145,8 +158,8 @@ void testMultiWatermarkBatch() {
 
     // Verify directory structure: subdirectory per watermark
     for (const auto& wm : rawWatermarks) {
-        fs::path subdir = workDir / stringToPath(sanitizeFilename(wm));
-        assert(fs::is_directory(subdir));
+        fs::path subdir = workDir / stringToPath(outputFolderForText(wm));
+        assert(fs::is_directory(subdir));   // e.g. 内部文件-李... (6-char truncation)
         fs::path expectedPdf = subdir / "sample_input.pdf";
         assert(fs::exists(expectedPdf));
         assert(fs::file_size(expectedPdf) > 0);

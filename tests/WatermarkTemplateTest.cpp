@@ -80,6 +80,40 @@ void testWatermarkTemplate() {
     assert(expanded.size() == 2);
     for (const auto& cfg : expanded) assert(!cfg.text.empty());
 
+    // ── output naming fields: variantSuffix / outputFolder ────────────────
+    {
+        // Empty outputFolder keeps the historical rule: folder == template name.
+        WatermarkTemplate named = tpl;
+        assert(named.variantSuffix.empty());
+        assert(named.outputFolder.empty());
+        assert(named.folderName() == "机密模板");
+        assert(named.displayLabel() == "机密模板");   // no variant => plain name
+
+        // displayLabel() keeps several styles of one text apart in the UI.
+        named.variantSuffix = "红色";
+        assert(named.displayLabel() == "机密模板·红色");
+
+        // An explicit folder wins over the name (this is the "merge" switch
+        // that puts several styles of one text into ONE folder).
+        named.outputFolder = "机密";
+        assert(named.folderName() == "机密");
+        assert(named.name == "机密模板");          // label untouched
+        assert(named.displayLabel() == "机密模板·红色");
+
+        // folderName() must be a reference into the template, not a copy, so
+        // later edits are visible without re-reading it.
+        named.outputFolder.clear();
+        assert(named.folderName() == named.name);
+        named.variantSuffix.clear();
+        assert(named.displayLabel() == named.name);
+    }
+
+    // ── trimCopy ─────────────────────────────────────────────────────────
+    assert(trimCopy("  机密  ") == "机密");
+    assert(trimCopy("\t\r\n 外部 \n") == "外部");
+    assert(trimCopy("   ").empty());
+    assert(trimCopy("").empty());
+
     // ── store round-trip (UTF-8 names + full style) ───────────────────────
     const fs::path dir = fs::temp_directory_path() / "pdfmark_template_test";
     std::error_code ec;
@@ -131,6 +165,89 @@ void testWatermarkTemplate() {
         assert(store.save());
     }
 
+    // ── schema 2: variantSuffix + outputFolder round-trip ──────────────────
+    {
+        WatermarkTemplate variant = makeTemplate("机密-红色");
+        variant.variantSuffix = "红色";
+        variant.outputFolder = "机密";
+
+        WatermarkTemplateStore store(jsonPath);
+        assert(store.load());
+        store.addOrReplace(variant);
+        assert(store.save());
+    }
+    {
+        WatermarkTemplateStore store(jsonPath);
+        assert(store.load());
+        const WatermarkTemplate* v = store.find(QString::fromUtf8("机密-红色"));
+        assert(v != nullptr);
+        assert(v->variantSuffix == "红色");
+        assert(v->outputFolder == "机密");
+        assert(v->folderName() == "机密");        // explicit folder wins
+        assert(v->displayLabel() == "机密-红色·红色");
+
+        const WatermarkTemplate* p = store.find(QString::fromUtf8("对外模板"));
+        assert(p != nullptr);
+        assert(p->variantSuffix.empty());          // never written => still empty
+        assert(p->outputFolder.empty());
+        assert(p->folderName() == "对外模板");      // ...and falls back to the name
+    }
+
+    // ── v1 files (no naming keys at all) keep loading ──────────────────────
+    {
+        const fs::path v1Path = dir / "v1_templates.json";
+        std::ofstream out(v1Path.string());
+        out << R"({"version":1,"templates":[{"name":"旧模板","watermarks":[{"text":"旧水印"}]}]})";
+        out.close();
+
+        WatermarkTemplateStore store(QString::fromStdString(pathToString(v1Path)));
+        assert(store.load());
+        assert(store.templates().size() == 1);
+        assert(store.templates()[0].variantSuffix.empty());
+        assert(store.templates()[0].outputFolder.empty());
+        assert(store.templates()[0].folderName() == "旧模板");
+    }
+
+    // ── duplicate names in a hand-edited file: first wins, no ghost rows ───
+    {
+        const fs::path dupPath = dir / "dup_templates.json";
+        std::ofstream out(dupPath.string());
+        out << R"({"version":2,"templates":[
+            {"name":"重复","watermarks":[{"text":"A"}]},
+            {"name":"重复","watermarks":[{"text":"B"}]}]})";
+        out.close();
+
+        WatermarkTemplateStore store(QString::fromStdString(pathToString(dupPath)));
+        assert(store.load());
+        assert(store.templates().size() == 1);   // second entry dropped
+        assert(store.templates()[0].watermarks[0].text == "A");
+    }
+
+    // ── names() / folderNames(): what the dialog is built from ─────────────
+    {
+        WatermarkTemplateStore store(jsonPath);
+        assert(store.load());
+
+        // A second style of "机密" that merges into the same folder.
+        WatermarkTemplate blue = makeTemplate("机密-蓝色");
+        blue.variantSuffix = "蓝色";
+        blue.outputFolder = "机密";
+        store.addOrReplace(blue);
+
+        const QStringList names = store.names();
+        assert(names.contains(QString::fromUtf8("机密-红色")));
+        assert(names.contains(QString::fromUtf8("对外模板")));
+        assert(names.contains(QString::fromUtf8("机密-蓝色")));
+
+        // Effective folders: "机密" appears once even though two templates share
+        // it, and a template without an explicit folder contributes its name.
+        const QStringList folders = store.folderNames();
+        assert(folders.count(QString::fromUtf8("机密")) == 1);
+        assert(folders.contains(QString::fromUtf8("机密")));
+        assert(folders.contains(QString::fromUtf8("对外模板")));
+        assert(!folders.contains(QString::fromUtf8("机密-红色")));   // merged away
+    }
+
     // ── template -> per-file configs ──────────────────────────────────────
     {
         // Line-level "selected" is no longer part of the model: every line of a
@@ -160,6 +277,32 @@ void testWatermarkTemplate() {
         named.name = "  自定义名  ";
         assert(normalizeTemplate(named));
         assert(named.name == "自定义名");               // user name wins, trimmed
+
+        // The two optional naming fields are trimmed too; a blank value means
+        // "not set" and must not survive as whitespace (that would create a
+        // folder literally called "   " / a file named report_  .pdf).
+        WatermarkTemplate spaced;
+        WatermarkConfig c; c.text = "机密";
+        spaced.watermarks.push_back(c);
+        spaced.name = "  变体一  ";
+        spaced.variantSuffix = "  红色  ";
+        spaced.outputFolder = "\t 机密 \n";
+        assert(normalizeTemplate(spaced));
+        assert(spaced.name == "变体一");
+        assert(spaced.variantSuffix == "红色");
+        assert(spaced.outputFolder == "机密");
+        assert(spaced.folderName() == "机密");
+
+        // Blank values collapse to empty (= fall back to name / no suffix).
+        WatermarkTemplate blanks;
+        blanks.watermarks.push_back(c);
+        blanks.name = "变体二";
+        blanks.variantSuffix = "   ";
+        blanks.outputFolder = "\n";
+        assert(normalizeTemplate(blanks));
+        assert(blanks.variantSuffix.empty());
+        assert(blanks.outputFolder.empty());
+        assert(blanks.folderName() == "变体二");
 
         WatermarkTemplate empty;
         empty.watermarks.push_back(blank);
@@ -231,6 +374,67 @@ void testWatermarkTemplate() {
         assert(templateNameFromConfigs(spaces).empty());
         assert(templateNameFromConfigs({}).empty());
     }
+
+    // ── resolveTemplateNaming: the reported "same text, different styles" ──
+    {
+        std::vector<WatermarkConfig> lines;
+        WatermarkConfig c;
+        c.text = "机密";
+        lines.push_back(c);
+
+        const std::vector<std::string> taken = {"机密"};
+
+        // First template: nothing taken yet, no explicit folder -> folder unset
+        // (= template name), so v1-style layouts are preserved byte for byte.
+        const TemplateNaming first = resolveTemplateNaming("", lines, {}, "");
+        assert(first.name == "机密");
+        assert(first.outputFolder.empty());
+
+        // Second style of the SAME text: the name collides, so it becomes a
+        // sibling AND the original name is pinned as the folder. Result: both
+        // templates write into <out>/机密/.
+        const TemplateNaming second = resolveTemplateNaming("", lines, taken, "");
+        assert(second.name == "机密 (2)");
+        assert(second.outputFolder == "机密");
+        assert(second.name != first.name);
+
+        // Third style: keeps counting.
+        const std::vector<std::string> taken2 = {"机密", "机密 (2)"};   // NOLINT
+        const TemplateNaming third = resolveTemplateNaming("", lines, taken2, "");
+        assert(third.name == "机密 (3)");
+        assert(third.outputFolder == "机密");
+
+        // An explicit folder always wins over the collision rule...
+        const TemplateNaming explicitFolder = resolveTemplateNaming("", lines, taken, "  对外  ");
+        assert(explicitFolder.name == "机密 (2)");
+        assert(explicitFolder.outputFolder == "对外");
+
+        // ...and a name that does NOT collide keeps the folder unset.
+        const TemplateNaming another = resolveTemplateNaming("机密-蓝色", lines, taken, "");
+        assert(another.name == "机密-蓝色");
+        assert(another.outputFolder.empty());
+
+        // Typed name wins over the derived one, and is trimmed.
+        const TemplateNaming typed = resolveTemplateNaming("  甲公司  ", lines, {}, "");
+        assert(typed.name == "甲公司");
+
+        // No text and no name: the name falls back to the generic placeholder,
+        // and normalizeTemplate() then rejects the template (the dialog keeps
+        // showing its "请至少填写一行水印文字" warning instead of saving it).
+        WatermarkTemplate nothing;
+        nothing.name = resolveTemplateNaming("", {}, {}, "").name;
+        assert(nothing.name == "watermark");
+        assert(!normalizeTemplate(nothing));
+    }
+
+    // ── uniqueNameAmong ───────────────────────────────────────────────────
+    assert(uniqueNameAmong("A", {}) == "A");
+    assert(uniqueNameAmong("A", {"A"}) == "A (2)");
+    assert(uniqueNameAmong("A", {"A", "A (2)"}) == "A (3)");
+    assert(uniqueNameAmong("A (2)", {"A"}) == "A (2)");
+    assert(uniqueNameAmong("", {}) == "watermark");
+    assert(uniqueNameAmong("  ", {}) == "watermark");
+    assert(uniqueNameAmong("", {"watermark"}) == "watermark (2)");
 
     fs::remove_all(dir, ec);
     std::cout << "[PASS] testWatermarkTemplate\n";

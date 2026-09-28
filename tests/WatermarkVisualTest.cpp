@@ -1,6 +1,8 @@
 #include "common/Common.h"
 #include "watermark/WatermarkRenderer.h"
 #include <cassert>
+#include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <QImage>
@@ -64,18 +66,20 @@ void testWatermarkVisual(const fs::path& outputDir) {
         assert(saved);
         std::cout << "  Generated: " << outFile << "\n";
 
-        // Verify pixel-level watermark presence
-        // Count pixels that match the watermark color band to ensure fusion occurred
+        // Verify pixel-level watermark presence: the watermark is drawn at 12%
+        // opacity, so it BLENDS with the page instead of painting the raw colour
+        // — an exact #BEBEBE match (what this test used to require) can never
+        // happen. Count faint-gray pixels instead: lighter than the test's
+        // #E0E0E0 guide lines, but not pure white.
         int watermarkPixels = 0;
         const int w = page.width();
         const int h = page.height();
         for (int y = h / 4; y < 3 * h / 4; y += 3) {
             for (int x = w / 4; x < 3 * w / 4; x += 3) {
-                QRgb px = page.pixel(x, y);
-                int r = qRed(px), g = qGreen(px), b = qBlue(px);
-                if (r == 0xBE && g == 0xBE && b == 0xBE) {
-                    watermarkPixels++;
-                }
+                const QRgb px = page.pixel(x, y);
+                const int r = qRed(px), g = qGreen(px), b = qBlue(px);
+                const bool gray = (std::abs(r - g) <= 2) && (std::abs(g - b) <= 2);
+                if (gray && r >= 240 && r < 255) ++watermarkPixels;
             }
         }
         std::cout << "  Sample '" << s.name << "' watermark pixels found in center: "

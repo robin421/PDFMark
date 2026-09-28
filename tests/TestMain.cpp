@@ -15,6 +15,8 @@ namespace pdfmark {
     void testWatermarkTemplate();
     void testWorkloadEstimate();
     void testConcurrencyBudget();
+    void testOutputNaming();
+    void testTemplateDialogNaming();
 }
 
 int main(int argc, char* argv[]) {
@@ -61,6 +63,12 @@ int main(int argc, char* argv[]) {
         }
         if (testName == "ALL" || testName == "ConcurrencyBudget") {
             pdfmark::testConcurrencyBudget();
+        }
+        if (testName == "ALL" || testName == "OutputNaming") {
+            pdfmark::testOutputNaming();
+        }
+        if (testName == "ALL" || testName == "TemplateDialog") {
+            pdfmark::testTemplateDialogNaming();
         }
 
         std::cout << "\n==============================\n";

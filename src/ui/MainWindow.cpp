@@ -38,6 +38,7 @@
 #include <QStandardPaths>
 #include <QInputDialog>
 #include <QCheckBox>
+#include <QMap>
 #include <QRadioButton>
 #include <QStackedWidget>
 #include <QThread>
@@ -735,7 +736,7 @@ bool MainWindow::confirmBatchRun(const std::vector<TaskManager::FileSubtask>& su
     // Writing files cannot be undone, so always state exactly what is about to
     // happen and where it lands.
     const QString outDir = outputDirEdit_->text().trimmed().isEmpty()
-        ? QStringLiteral("与源文件相同目录（按水印文字自动建子目录）")
+        ? QStringLiteral("与源文件相同目录（按模板的输出文件夹自动建子目录）")
         : outputDirEdit_->text().trimmed();
 
     const std::vector<WatermarkTemplate> tpls = checkedTemplates();
@@ -752,6 +753,25 @@ bool MainWindow::confirmBatchRun(const std::vector<TaskManager::FileSubtask>& su
         .arg(sourceDesc)
         .arg(tplNames.isEmpty() ? QStringLiteral("（无）") : tplNames.join(QStringLiteral("、")))
         .arg(outDir);
+
+    // Spell the grouping out: several styles of one text are supposed to land in
+    // ONE folder, and that is much easier to trust when it is printed here.
+    if (!tpls.empty()) {
+        // folder -> [variant suffixes] (empty list == no variant suffix)
+        QMap<QString, QStringList> byFolder;
+        for (const auto& t : tpls) {
+            const QString folder = QString::fromUtf8(t.folderName().c_str());
+            QString label = t.variantSuffix.empty()
+                ? QString::fromUtf8(t.name.c_str())
+                : QStringLiteral("文件名后缀 _%1").arg(QString::fromUtf8(t.variantSuffix.c_str()));
+            byFolder[folder] << label;
+        }
+        QStringList folderLines;
+        for (auto it = byFolder.constBegin(); it != byFolder.constEnd(); ++it) {
+            folderLines << QStringLiteral("  • %1/ ← %2").arg(it.key(), it.value().join(QStringLiteral("、")));
+        }
+        detail += QStringLiteral("\n输出文件夹分组：\n") + folderLines.join(QStringLiteral("\n"));
+    }
 
     detail += "\n" + autoLine;
     if (risky) {
@@ -990,16 +1010,36 @@ void MainWindow::refreshTemplateList(const QString& select) {
         }
         const WatermarkConfig st = tpl.style();
 
-        auto* item = new QListWidgetItem(QString("%1    ·    %2 条 · %3pt · %4° · %5%")
+        // Show the grouping/naming extras only when they add information: a
+        // plain template still renders as before, while a variant makes it
+        // obvious why two rows share one output folder.
+        const QString folder = QString::fromUtf8(tpl.folderName().c_str());
+        QStringList extras;
+        if (!tpl.variantSuffix.empty()) {
+            extras << QStringLiteral("变体 %1").arg(QString::fromUtf8(tpl.variantSuffix.c_str()));
+        }
+        if (tpl.outputFolder.empty() || tpl.outputFolder == tpl.name) {
+            extras << QStringLiteral("→ %1/").arg(folder);
+        } else {
+            extras << QStringLiteral("→ %1/（合并）").arg(folder);
+        }
+
+        auto* item = new QListWidgetItem(QString("%1    ·    %2 条 · %3pt · %4° · %5%    ·    %6")
             .arg(name).arg(lines).arg(st.fontSizePt)
             .arg(st.rotationDegrees)
-            .arg(static_cast<int>(st.opacity * 100.0 + 0.5)));
+            .arg(static_cast<int>(st.opacity * 100.0 + 0.5))
+            .arg(extras.join(QStringLiteral(" "))));
         item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
         // Set the state before insertion so building the list emits no signals.
         item->setCheckState(Qt::Checked);
         item->setData(Qt::UserRole, name);
-        item->setToolTip(QString("模板「%1」\n水印文字：\n%2\n\n勾选 = 参与生成；模板名即输出子目录名")
-            .arg(name).arg(texts.join("\n")));
+        item->setToolTip(QString("模板「%1」\n水印文字：\n%2\n\n"
+                                 "勾选 = 参与生成；输出目录：%3/；文件名后缀：%4")
+            .arg(name).arg(texts.join("\n"))
+            .arg(folder)
+            .arg(tpl.variantSuffix.empty()
+                     ? QStringLiteral("（无）")
+                     : QString("_%1").arg(QString::fromUtf8(tpl.variantSuffix.c_str()))));
         templateList_->addItem(item);
     }
 
@@ -1074,23 +1114,22 @@ void MainWindow::onSelectNoneTemplates() {
 }
 
 void MainWindow::onNewTemplate() {
-    TemplateEditDialog dlg(WatermarkTemplate{}, true, this);
+    // A colliding name no longer overwrites: the dialog renames the NEW template
+    // to a sibling ("机密 (2)") and merges its output into the same folder, which
+    // is exactly the "same text, different style" case.
+    TemplateEditDialog dlg(WatermarkTemplate{}, true,
+                           templateStore_.names(), templateStore_.folderNames(), this);
     if (dlg.exec() != QDialog::Accepted) return;
 
-    WatermarkTemplate tpl = dlg.result();
+    const WatermarkTemplate tpl = dlg.result();
     const QString name = QString::fromUtf8(tpl.name.c_str());
-    if (templateStore_.find(name)) {
-        if (QMessageBox::question(this, "覆盖模板",
-                QString("已存在同名模板「%1」，是否覆盖？").arg(name))
-            != QMessageBox::Yes) {
-            return;
-        }
-    }
+    if (templateStore_.find(name)) return;   // defensive: must not happen
+
     templateStore_.addOrReplace(tpl);
     templateStore_.save();
     refreshTemplateList(name);
     updateUiState(taskManager_.isRunning());
-    statusLabel_->setText(QString("模板「%1」已保存。").arg(name));
+    statusLabel_->setText(templateSavedMessage(tpl, QStringLiteral("已保存")));
 }
 
 void MainWindow::onEditTemplate() {
@@ -1099,21 +1138,19 @@ void MainWindow::onEditTemplate() {
         QMessageBox::information(this, "提示", "请先在列表中选择一个模板。");
         return;
     }
-    TemplateEditDialog dlg(cur, false, this);
+
+    // Editing in place must stay possible, so the template's own name is not in
+    // the taken list; renaming onto ANOTHER template's name is de-duplicated
+    // instead of overwriting it.
+    QStringList taken = templateStore_.names();
+    taken.removeAll(QString::fromUtf8(cur.name.c_str()));
+    TemplateEditDialog dlg(cur, false, taken, templateStore_.folderNames(), this);
     if (dlg.exec() != QDialog::Accepted) return;
 
     const WatermarkTemplate edited = dlg.result();
     const QString oldName = QString::fromUtf8(cur.name.c_str());
     const QString newName = QString::fromUtf8(edited.name.c_str());
 
-    // Ask before touching the store so a declined overwrite loses nothing.
-    if (newName != oldName && templateStore_.find(newName)) {
-        if (QMessageBox::question(this, "覆盖模板",
-                QString("已存在同名模板「%1」，是否覆盖？").arg(newName))
-            != QMessageBox::Yes) {
-            return;
-        }
-    }
     if (newName != oldName) {
         templateStore_.remove(oldName);
     }
@@ -1121,7 +1158,19 @@ void MainWindow::onEditTemplate() {
     templateStore_.save();
     refreshTemplateList(newName);
     updateUiState(taskManager_.isRunning());
-    statusLabel_->setText(QString("模板「%1」已更新。").arg(newName));
+    statusLabel_->setText(templateSavedMessage(edited, QStringLiteral("已更新")));
+}
+
+// Status-bar text after a save. When the output folder was pinned to another
+// template's folder, say so: the user asked for "several styles, ONE folder",
+// and this is the confirmation that it happened.
+QString MainWindow::templateSavedMessage(const WatermarkTemplate& tpl, const QString& verb) const {
+    const QString name = QString::fromUtf8(tpl.name.c_str());
+    const QString folder = QString::fromUtf8(tpl.folderName().c_str());
+    if (!tpl.outputFolder.empty() && folder != name) {
+        return QString("模板「%1」%2，输出合并到「%3」文件夹。").arg(name, verb, folder);
+    }
+    return QString("模板「%1」%2。").arg(name, verb);
 }
 
 void MainWindow::onDeleteTemplate() {

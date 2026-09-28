@@ -216,18 +216,27 @@ void TaskManager::cancel() {
 }
 
 fs::path TaskManager::outputPathFor(const fs::path& input,
-                                   const std::string& watermarkText,
+                                   const std::string& folder,
+                                   const std::string& variantSuffix,
                                    int duplicateIndex) const {
-    // 子目录 = 水印文本的 sanitize 版本
-    std::string subdir = watermarkText.empty() ? std::string("watermark")
-                                               : sanitizeFilename(watermarkText);
-    // 文件名 = 源 PDF 的原文件名（stem+ext）
+    // 子目录 = 模板的有效文件夹名（outputFolder，未设置时为模板名）
+    const std::string subdir = sanitizeFilename(folder);
+
+    // 文件名 = 源 PDF 的原文件名（stem+ext），可选拼上「变体后缀」，
+    // 让同一文件夹内「文字相同、样式不同」的输出彼此可区分：报告_红色.pdf
+    const std::string stem = pathToString(input.stem());
+    const std::string ext = pathToString(input.extension());
+    const std::string suffix = sanitizeFilenameOrEmpty(variantSuffix);
+
     std::string filename = pathToString(input.filename());
+    if (!suffix.empty()) {
+        filename = stem + "_" + suffix + ext;
+    }
     if (duplicateIndex > 0) {
-        // 添加序号以区分同名文件
-        std::string stem = pathToString(input.stem());
-        std::string ext = pathToString(input.extension());
-        filename = stem + "_" + std::to_string(duplicateIndex) + ext;
+        // 后缀留空或后缀也相同导致仍然重名时，退化为 _1 / _2 序号
+        const std::string tag = suffix.empty() ? ("_" + std::to_string(duplicateIndex))
+                                               : ("_" + suffix + "_" + std::to_string(duplicateIndex));
+        filename = stem + tag + ext;
     }
     if (!outputDir_.empty()) {
         return outputDir_ / stringToPath(subdir) / stringToPath(filename);
@@ -253,7 +262,7 @@ void TaskManager::processDocumentBatch(const DocumentBatchJob& docJob,
             FileResult res;
             res.inputPath = task.input;
             res.outputPath = task.output;
-            res.watermarkText = task.tpl.name;
+            res.watermarkText = task.tpl.displayLabel();
             res.success = false;
             res.errorMessage = "Operation cancelled";
             {
@@ -334,7 +343,7 @@ void TaskManager::processDocumentBatch(const DocumentBatchJob& docJob,
             FileResult res;
             res.inputPath = ctx.task->input;
             res.outputPath = ctx.task->output;
-            res.watermarkText = ctx.task->tpl.name;
+            res.watermarkText = ctx.task->tpl.displayLabel();
             res.success = false;
             res.errorMessage = e.what();
             res.elapsedMs = ctx.elapsedMs;
@@ -435,7 +444,7 @@ void TaskManager::processDocumentBatch(const DocumentBatchJob& docJob,
         FileResult res;
         res.inputPath = ctx.task->input;
         res.outputPath = ctx.task->output;
-        res.watermarkText = ctx.task->tpl.name;
+        res.watermarkText = ctx.task->tpl.displayLabel();
         res.totalPages = totalPages;
         res.elapsedMs = ctx.elapsedMs;
 
@@ -518,17 +527,17 @@ void TaskManager::start() {
     for (size_t i = 0; i < activeSubtasks.size(); ++i) {
         const auto& st = activeSubtasks[i];
         int dupIdx = 0;
-        fs::path out = outputPathFor(st.input, st.tpl.name, dupIdx);
+        fs::path out = outputPathFor(st.input, st.tpl.folderName(), st.tpl.variantSuffix, dupIdx);
         while (usedOutputPaths.find(pathToString(out)) != usedOutputPaths.end()) {
             dupIdx++;
-            out = outputPathFor(st.input, st.tpl.name, dupIdx);
+            out = outputPathFor(st.input, st.tpl.folderName(), st.tpl.variantSuffix, dupIdx);
         }
         usedOutputPaths.insert(pathToString(out));
 
         QString fileName = QString::fromUtf8(pathToString(st.input.filename()).c_str());
         QString displayName = QString("%1 [%2]")
             .arg(fileName)
-            .arg(QString::fromUtf8(st.tpl.name.c_str()));
+            .arg(QString::fromUtf8(st.tpl.displayLabel().c_str()));
 
         allTasks.push_back({st.input, out, st.tpl, static_cast<int>(i), displayName});
     }
@@ -675,7 +684,7 @@ void TaskManager::start() {
                         FileResult res;
                         res.inputPath = task.input;
                         res.outputPath = task.output;
-                        res.watermarkText = task.tpl.name;
+                        res.watermarkText = task.tpl.displayLabel();
                         res.success = false;
                         res.errorMessage = "Operation cancelled";
                         {
