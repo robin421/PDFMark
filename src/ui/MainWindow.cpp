@@ -1,12 +1,12 @@
 // PDFMark - Main GUI Window implementation.
 #include "ui/MainWindow.h"
+#include "ui/TemplateEditDialog.h"
 #include "ui/FileTableSelection.h"
 #include "ui/PasswordDialog.h"
 #include "diagnostics/Diagnostics.h"
 #include "task/WorkerPool.h"
 #include "pdf/PdfDocument.h"
 #include "watermark/WatermarkRenderer.h"
-#include "watermark/WatermarkSelection.h"
 #include "updater/AutoUpdater.h"
 #include "updater/UpdateDialog.h"
 
@@ -41,6 +41,7 @@
 #include <QRadioButton>
 #include <QStackedWidget>
 #include <QThread>
+#include <QSignalBlocker>
 #include <QButtonGroup>
 #include <QMenu>
 #include <QSignalBlocker>
@@ -62,67 +63,6 @@ static constexpr int kPagesRole   = Qt::UserRole + 1;
 static constexpr int kStatusRole  = Qt::UserRole + 2;
 
 
-// Human hint for the watermark opacity slider (shared by the slider, the
-// spin box and programmatic style application so they can never disagree).
-static QString depthHintText(int percent) {
-    if (percent <= 8) return QStringLiteral("极浅");
-    if (percent <= 12) return QStringLiteral("偏浅");
-    if (percent <= 25) return QStringLiteral("适中");
-    if (percent <= 40) return QStringLiteral("偏深");
-    return QStringLiteral("深色");
-}
-
-// ── WatermarkRow ────────────────────────────────────────────────────────────
-WatermarkRow::WatermarkRow(const QString& initialText, int index, QWidget* parent)
-    : QWidget(parent), index_(index) {
-    auto* h = new QHBoxLayout(this);
-    h->setContentsMargins(0, 0, 0, 0);
-    h->setSpacing(6);
-
-    checkBox_ = new QCheckBox(this);
-    checkBox_->setChecked(true);
-    checkBox_->setToolTip("勾选：生成时包含此水印；取消勾选：跳过此水印");
-    h->addWidget(checkBox_);
-
-    lineEdit_ = new QLineEdit(this);
-    lineEdit_->setText(initialText);
-    lineEdit_->setPlaceholderText("水印文字（例如：机密-张三）");
-    h->addWidget(lineEdit_, 1);
-
-    removeBtn_ = new QPushButton("×", this);
-    removeBtn_->setFixedSize(28, 28);
-    removeBtn_->setStyleSheet("color: #cc0000; font-weight: bold; font-size: 16px;");
-    removeBtn_->setToolTip("删除此水印");
-    h->addWidget(removeBtn_);
-
-    connect(checkBox_, &QCheckBox::toggled, this, [this](bool on) {
-        lineEdit_->setStyleSheet(on ? QString() : QStringLiteral("color: #999999;"));
-        emit selectionChanged();
-    });
-    connect(lineEdit_, &QLineEdit::textChanged, this, [this](const QString&) {
-        emit textChanged();
-    });
-    connect(removeBtn_, &QPushButton::clicked, this, [this]() {
-        emit removeRequested(index_);
-    });
-}
-
-QString WatermarkRow::text() const {
-    return lineEdit_->text();
-}
-
-void WatermarkRow::setText(const QString& t) {
-    lineEdit_->setText(t);
-}
-
-bool WatermarkRow::isSelected() const {
-    return checkBox_->isChecked();
-}
-
-void WatermarkRow::setSelected(bool on) {
-    checkBox_->setChecked(on);
-    lineEdit_->setStyleSheet(on ? QString() : QStringLiteral("color: #999999;"));
-}
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent) {
     setupUi();
@@ -131,8 +71,7 @@ MainWindow::MainWindow(QWidget* parent)
     resize(1100, 720);
 
     templateStore_.load();
-    refreshTemplateCombo();
-    onWatermarkModeChanged();
+    refreshTemplateList();
     updateUiState(false);
 
     // Auto-update: create updater, add Help menu, and do a silent background check
@@ -199,10 +138,10 @@ void MainWindow::setupUi() {
     connect(clearBtn, &QPushButton::clicked, this, &MainWindow::onClearFiles);
     connect(removeSelBtn, &QPushButton::clicked, this, &MainWindow::onRemoveSelectedFile);
 
-    // 2. Middle Splitter (Left: Table, Right: Params + Preview)
+    // 2. Middle Splitter (Left: file list, Right: templates + output)
     auto* splitter = new QSplitter(Qt::Horizontal, this);
 
-    // Left: File Table
+    // Left: file list (checkbox + file name only)
     auto* leftContainer = new QWidget(splitter);
     auto* leftLayout = new QVBoxLayout(leftContainer);
     leftLayout->setContentsMargins(0, 0, 0, 0);
@@ -220,203 +159,68 @@ void MainWindow::setupUi() {
 
     splitter->addWidget(leftContainer);
 
-    // Right: per-file watermark panel + Params + Preview
+    // Right: global templates + output settings
     auto* rightContainer = new QWidget(splitter);
     auto* rightLayout = new QVBoxLayout(rightContainer);
     rightLayout->setContentsMargins(0, 0, 0, 0);
     rightLayout->setSpacing(8);
 
-
-    // ── Header: mode switch (segmented control) + scope banner ───────────
-    // "模板"    : one global template drives every PDF. Nothing per file.
-    // "自定义"  : edit the watermark rows/style of the currently selected PDF.
-    auto* headRow = new QHBoxLayout();
-    headRow->setSpacing(8);
-
-    modeTemplateBtn_ = new QPushButton("模板", rightContainer);
-    modeCustomBtn_ = new QPushButton("自定义", rightContainer);
-    for (QPushButton* b : {modeTemplateBtn_, modeCustomBtn_}) {
-        b->setCheckable(true);
-        b->setCursor(Qt::PointingHandCursor);
-        b->setStyleSheet(
-            "QPushButton{border:1px solid #c8d0da;background:#ffffff;padding:5px 18px;}"
-            "QPushButton:checked{background:#0078d4;color:#ffffff;border-color:#0078d4;font-weight:bold;}"
-            "QPushButton:disabled{color:#aaaaaa;background:#f2f4f7;}");
-    }
-    modeTemplateBtn_->setChecked(true);
-    modeTemplateBtn_->setToolTip("用一个全局模板生成：选好模板后点生成即可，无需逐个文件配置");
-    modeCustomBtn_->setToolTip("只为当前选中的 PDF 单独编辑水印文字与样式");
-    modeButtonGroup_ = new QButtonGroup(this);
-    modeButtonGroup_->setExclusive(true);
-    modeButtonGroup_->addButton(modeTemplateBtn_);
-    modeButtonGroup_->addButton(modeCustomBtn_);
-    headRow->addWidget(modeTemplateBtn_);
-    headRow->addWidget(modeCustomBtn_);
-
-    scopeLabel_ = new QLabel(rightContainer);
-    scopeLabel_->setStyleSheet("color:#666666; font-size:12px;");
-    scopeLabel_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    scopeLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    headRow->addWidget(scopeLabel_, 1);
-    rightLayout->addLayout(headRow);
-
-    watermarkModeStack_ = new QStackedWidget(rightContainer);
-
-    // ── Page 0: template mode ─────────────────────────────────────────────
-    auto* tplPage = new QWidget(watermarkModeStack_);
-    auto* tplPageLayout = new QVBoxLayout(tplPage);
-    tplPageLayout->setContentsMargins(0, 0, 0, 0);
-    tplPageLayout->setSpacing(8);
-
-    auto* tplGroup = new QGroupBox("水印模板", tplPage);
+    // ── Watermark templates (global) ──────────────────────────────────────
+    // There is no per-PDF watermark editing any more: watermarks exist only as
+    // global templates, so one can be created without loading any file.
+    auto* tplGroup = new QGroupBox("水印模板", rightContainer);
     auto* tplLayout = new QVBoxLayout(tplGroup);
     tplLayout->setContentsMargins(10, 12, 10, 10);
     tplLayout->setSpacing(6);
 
-    auto* tplRow1 = new QHBoxLayout();
-    tplRow1->setSpacing(6);
-    tplRow1->addWidget(new QLabel("模板:", tplGroup));
-    templateCombo_ = new QComboBox(tplGroup);
-    templateCombo_->setMinimumWidth(140);
-    templateCombo_->setToolTip("选择一个已保存的全局模板（多行文字 + 一套样式）");
-    tplRow1->addWidget(templateCombo_, 1);
-    manageTemplateBtn_ = new QPushButton("管理...", tplGroup);
-    manageTemplateBtn_->setToolTip("重命名或删除已保存的水印模板");
-    tplRow1->addWidget(manageTemplateBtn_);
-    tplLayout->addLayout(tplRow1);
+    auto* tplHead = new QHBoxLayout();
+    tplHead->setSpacing(6);
+    tplHead->addWidget(new QLabel("勾选要使用的模板（可多选）:", tplGroup));
+    tplHead->addStretch();
+    selectAllTemplatesBtn_ = new QPushButton("全选", tplGroup);
+    selectNoneTemplatesBtn_ = new QPushButton("全不选", tplGroup);
+    selectAllTemplatesBtn_->setStyleSheet("padding:3px 10px;");
+    selectNoneTemplatesBtn_->setStyleSheet("padding:3px 10px;");
+    selectAllTemplatesBtn_->setToolTip("勾选全部模板");
+    selectNoneTemplatesBtn_->setToolTip("取消勾选全部模板");
+    tplHead->addWidget(selectAllTemplatesBtn_);
+    tplHead->addWidget(selectNoneTemplatesBtn_);
+    tplLayout->addLayout(tplHead);
 
-    tplPreviewLabel_ = new QLabel(tplGroup);
-    tplPreviewLabel_->setWordWrap(true);
-    tplPreviewLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    tplPreviewLabel_->setStyleSheet(
+    templateList_ = new QListWidget(tplGroup);
+    templateList_->setSelectionMode(QAbstractItemView::SingleSelection);
+    templateList_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    templateList_->setAlternatingRowColors(true);
+    templateList_->setToolTip("勾选的模板参与生成；选中某项后可用下方按钮编辑/删除/预览");
+    tplLayout->addWidget(templateList_, 1);
+
+    auto* tplBtns = new QHBoxLayout();
+    tplBtns->setSpacing(6);
+    newTemplateBtn_ = new QPushButton("新建模板...", tplGroup);
+    newTemplateBtn_->setStyleSheet("padding:6px 14px; font-weight:bold;");
+    newTemplateBtn_->setToolTip("新建一个全局水印模板（无需先添加 PDF）");
+    editTemplateBtn_ = new QPushButton("编辑...", tplGroup);
+    editTemplateBtn_->setStyleSheet("padding:6px 14px;");
+    deleteTemplateBtn_ = new QPushButton("删除", tplGroup);
+    deleteTemplateBtn_->setStyleSheet("padding:6px 14px; color:#cc0000;");
+    previewTemplateBtn_ = new QPushButton("预览", tplGroup);
+    previewTemplateBtn_->setStyleSheet("padding:6px 14px;");
+    previewTemplateBtn_->setToolTip("预览选中模板在 PDF 页面上的实际效果");
+    tplBtns->addWidget(newTemplateBtn_);
+    tplBtns->addWidget(editTemplateBtn_);
+    tplBtns->addWidget(previewTemplateBtn_);
+    tplBtns->addWidget(deleteTemplateBtn_);
+    tplBtns->addStretch();
+    tplLayout->addLayout(tplBtns);
+    rightLayout->addWidget(tplGroup, 1);
+
+    summaryLabel_ = new QLabel(rightContainer);
+    summaryLabel_->setWordWrap(true);
+    summaryLabel_->setStyleSheet(
         "color:#3a3a3a; background:#f7f9fc; border:1px solid #dde3ea; "
         "border-radius:4px; padding:8px;");
-    tplLayout->addWidget(tplPreviewLabel_);
-
-    // Empty-state action: there is nothing to generate with until a template
-    // exists, so offer the one step that fixes it.
-    gotoCustomBtn_ = new QPushButton("去「自定义」创建模板", tplGroup);
-    gotoCustomBtn_->setCursor(Qt::PointingHandCursor);
-    gotoCustomBtn_->setStyleSheet("padding:5px 12px;");
-    gotoCustomBtn_->setToolTip("在自定义模式里编辑水印文字与样式，再点「存为模板...」即可生成全局模板");
-    tplLayout->addWidget(gotoCustomBtn_, 0, Qt::AlignLeft);
-    tplPageLayout->addWidget(tplGroup);
-    tplPageLayout->addStretch();
-
-    // ── Page 1: custom mode (per-PDF editing) ─────────────────────────────
-    auto* customPage = new QWidget(watermarkModeStack_);
-    auto* customLayout = new QVBoxLayout(customPage);
-    customLayout->setContentsMargins(0, 0, 0, 0);
-    customLayout->setSpacing(8);
-
-    customHintLabel_ = new QLabel(customPage);
-    customHintLabel_->setWordWrap(true);
-    customHintLabel_->setStyleSheet("color:#a06000; background:#fff8e6; "
-                                    "border:1px solid #f0dca8; border-radius:4px; padding:6px;");
-    customHintLabel_->setVisible(false);
-    customLayout->addWidget(customHintLabel_);
-
-    // Watermark rows scroll area
-    watermarkScrollArea_ = new QScrollArea(customPage);
-    watermarkScrollArea_->setWidgetResizable(true);
-    watermarkScrollArea_->setFrameShape(QFrame::NoFrame);
-    watermarkContainer_ = new QWidget(watermarkScrollArea_);
-    watermarkLayout_ = new QVBoxLayout(watermarkContainer_);
-    watermarkLayout_->setContentsMargins(0, 0, 0, 0);
-    watermarkLayout_->setSpacing(4);
-    watermarkLayout_->addStretch();
-    watermarkScrollArea_->setWidget(watermarkContainer_);
-    customLayout->addWidget(watermarkScrollArea_, 1);
-
-    auto* btnRow = new QHBoxLayout();
-    btnRow->setSpacing(6);
-    loadTemplateBtn_ = new QPushButton("从模板载入", customPage);
-    loadTemplateBtn_->setStyleSheet("padding: 6px 14px;");
-    loadTemplateBtn_->setToolTip("把模板的文字与样式填入编辑区（不生成）；未选择 PDF 时填入全局草稿，之后可自由微调");
-    loadTemplateBtn_->setMenu(new QMenu(loadTemplateBtn_));
-    addWatermarkBtn_ = new QPushButton("+ 添加水印", customPage);
-    addWatermarkBtn_->setStyleSheet("padding: 6px 14px; font-weight: bold;");
-    // "存为模板" lives with the watermark rows it saves, and always produces a
-    // GLOBAL template (templates are never bound to a single PDF).
-    saveTemplateBtn_ = new QPushButton("存为模板...", customPage);
-    saveTemplateBtn_->setStyleSheet("padding: 6px 14px;");
-    saveTemplateBtn_->setToolTip("把当前编辑的水印文字与样式保存为全局模板（可在「模板」模式套用到任意 PDF）");
-    btnRow->addWidget(addWatermarkBtn_);
-    btnRow->addWidget(loadTemplateBtn_);
-    btnRow->addWidget(saveTemplateBtn_);
-    btnRow->addStretch();
-    customLayout->addLayout(btnRow);
-
-    // Watermark style (per-PDF in custom mode)
-    auto* paramGroup = new QGroupBox("水印样式设置", customPage);
-    auto* grid = new QGridLayout(paramGroup);
-    grid->setContentsMargins(10, 12, 10, 10);
-    grid->setHorizontalSpacing(10);
-    grid->setVerticalSpacing(10);
-
-    int row = 0;
-    grid->addWidget(new QLabel("颜色深浅:"), row, 0);
-    auto* depthBox = new QWidget(paramGroup);
-    auto* depthLayout = new QHBoxLayout(depthBox);
-    depthLayout->setContentsMargins(0, 0, 0, 0);
-    depthLayout->setSpacing(8);
-    depthSlider_ = new QSlider(Qt::Horizontal, depthBox);
-    depthSlider_->setRange(5, 60);
-    depthSlider_->setValue(15);
-    depthSpin_ = new QSpinBox(depthBox);
-    depthSpin_->setRange(5, 60);
-    depthSpin_->setValue(15);
-    depthSpin_->setSuffix(" %");
-    depthSpin_->setToolTip("可直接键入精确数值（模板里保存的就是这个百分比）");
-    depthValueLabel_ = new QLabel("适中", depthBox);
-    depthValueLabel_->setStyleSheet("color:#777777; font-size:11px;");
-    depthValueLabel_->setFixedWidth(30);
-    depthLayout->addWidget(depthSlider_, 1);
-    depthLayout->addWidget(depthSpin_);
-    depthLayout->addWidget(depthValueLabel_);
-    grid->addWidget(depthBox, row, 1, 1, 2);
-    row++;
-
-    // Watermark Rotation (degrees)
-    grid->addWidget(new QLabel("倾斜角度:"), row, 0);
-    rotationSpin_ = new QDoubleSpinBox(paramGroup);
-    rotationSpin_->setRange(-90.0, 90.0);
-    rotationSpin_->setSingleStep(5.0);
-    rotationSpin_->setValue(-35.0);
-    rotationSpin_->setSuffix("°");
-    rotationSpin_->setToolTip("水印倾斜角度，支持 -90° 到 90°，默认 -35°（左下到右上）");
-    grid->addWidget(rotationSpin_, row, 1, 1, 2);
-    row++;
-
-    // Watermark Font Family
-    grid->addWidget(new QLabel("水印字体:"), row, 0);
-    fontCombo_ = new QFontComboBox(paramGroup);
-    fontCombo_->setCurrentFont(QFont("Arial"));
-    fontCombo_->setToolTip("选择水印文字所使用的字体");
-    grid->addWidget(fontCombo_, row, 1, 1, 2);
-    row++;
-
-    // Font Style: Bold & Italic
-    grid->addWidget(new QLabel("字体样式:"), row, 0);
-    auto* styleWidget = new QWidget(paramGroup);
-    auto* styleLayout = new QHBoxLayout(styleWidget);
-    styleLayout->setContentsMargins(0, 0, 0, 0);
-    styleLayout->setSpacing(12);
-    boldCheck_ = new QCheckBox("加粗", styleWidget);
-    boldCheck_->setChecked(true);
-    italicCheck_ = new QCheckBox("斜体", styleWidget);
-    italicCheck_->setChecked(false);
-    styleLayout->addWidget(boldCheck_);
-    styleLayout->addWidget(italicCheck_);
-    styleLayout->addStretch();
-    grid->addWidget(styleWidget, row, 1, 1, 2);
-    row++;
-
-    customLayout->addWidget(paramGroup);
-
-    watermarkModeStack_->addWidget(tplPage);
-    watermarkModeStack_->addWidget(customPage);
-    rightLayout->addWidget(watermarkModeStack_, 1);
+    summaryLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    rightLayout->addWidget(summaryLabel_);
 
     // ── Output settings (shared by both modes) ───────────────────────────
     auto* outGroup = new QGroupBox("输出", rightContainer);
@@ -472,14 +276,6 @@ void MainWindow::setupUi() {
     ctlRow->addWidget(statusLabel_, 1);
 
     // 性能模式紧挨着生成按钮，运行时最常调的开关就在这里
-    // 预览提升为全局动作：模板模式预览模板，自定义模式预览当前编辑内容
-    previewBtn_ = new QPushButton("预览", statusCard);
-    previewBtn_->setStyleSheet("padding: 5px 12px;");
-    previewBtn_->setToolTip("预览水印在 PDF 页面上的实际效果");
-    connect(previewBtn_, &QPushButton::clicked, this, &MainWindow::onPreviewWatermark);
-    ctlRow->addWidget(previewBtn_);
-    ctlRow->addSpacing(8);
-
     cancelBtn_ = new QPushButton("取消", statusCard);
     cancelBtn_->setEnabled(false);
     cancelBtn_->setStyleSheet("padding: 5px 12px;");
@@ -514,20 +310,12 @@ void MainWindow::setupUi() {
 }
 
 void MainWindow::setupConnections() {
-    connect(depthSlider_, &QSlider::valueChanged, this, [this](int val) {
-        if (depthSpin_->value() != val) {
-            QSignalBlocker block(depthSpin_);
-            depthSpin_->setValue(val);
-        }
-        depthValueLabel_->setText(depthHintText(val));
-    });
-    connect(depthSpin_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int val) {
-        if (depthSlider_->value() != val) depthSlider_->setValue(val);
-    });
-
     // Keyboard shortcuts
     auto* openSc = new QShortcut(QKeySequence::Open, this);
     connect(openSc, &QShortcut::activated, this, &MainWindow::onAddFiles);
+    // 新建模板是主操作，给一个快捷键（Cmd/Ctrl+N）
+    auto* newTplSc = new QShortcut(QKeySequence::New, this);
+    connect(newTplSc, &QShortcut::activated, this, &MainWindow::onNewTemplate);
     auto* genSc = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Return), this);
     connect(genSc, &QShortcut::activated, this, &MainWindow::onStartAllClicked);
     auto* escSc = new QShortcut(QKeySequence(Qt::Key_Escape), this);
@@ -550,34 +338,21 @@ void MainWindow::setupConnections() {
     connect(selectAllBtn_, &QPushButton::clicked, this, &MainWindow::onSelectAllFiles);
     connect(selectNoneBtn_, &QPushButton::clicked, this, &MainWindow::onSelectNoFiles);
 
-    // Add watermark row button
-    connect(addWatermarkBtn_, &QPushButton::clicked, this, &MainWindow::addWatermarkRow);
-
-    // Watermark mode switch (segmented control)
-    connect(modeTemplateBtn_, &QPushButton::toggled, this, &MainWindow::onWatermarkModeChanged);
-    connect(modeCustomBtn_, &QPushButton::toggled, this, &MainWindow::onWatermarkModeChanged);
-    connect(gotoCustomBtn_, &QPushButton::clicked, this, [this]() {
-        modeCustomBtn_->setChecked(true);   // toggled -> onWatermarkModeChanged
+    // ── Templates ───────────────────────────────────────────────────────
+    connect(newTemplateBtn_, &QPushButton::clicked, this, &MainWindow::onNewTemplate);
+    connect(editTemplateBtn_, &QPushButton::clicked, this, &MainWindow::onEditTemplate);
+    connect(deleteTemplateBtn_, &QPushButton::clicked, this, &MainWindow::onDeleteTemplate);
+    connect(previewTemplateBtn_, &QPushButton::clicked, this, &MainWindow::onPreviewTemplate);
+    connect(selectAllTemplatesBtn_, &QPushButton::clicked, this, &MainWindow::onSelectAllTemplates);
+    connect(selectNoneTemplatesBtn_, &QPushButton::clicked, this, &MainWindow::onSelectNoneTemplates);
+    connect(templateList_, &QListWidget::itemChanged, this, [this](QListWidgetItem*) {
+        onTemplateItemChanged();
     });
-
-    // Watermark template controls
-    connect(loadTemplateBtn_->menu(), &QMenu::aboutToShow, this, [this]() {
-        QMenu* menu = loadTemplateBtn_->menu();
-        menu->clear();
-        for (const auto& tpl : templateStore_.templates()) {
-            const QString name = QString::fromUtf8(tpl.name.c_str());
-            QAction* act = menu->addAction(name);
-            connect(act, &QAction::triggered, this, [this, name]() { loadTemplateByName(name); });
-        }
-        if (menu->isEmpty()) {
-            QAction* none = menu->addAction("（暂无模板）");
-            none->setEnabled(false);
-        }
+    connect(templateList_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem*) {
+        onEditTemplate();
     });
-    connect(saveTemplateBtn_, &QPushButton::clicked, this, &MainWindow::onSaveAsTemplate);
-    connect(manageTemplateBtn_, &QPushButton::clicked, this, &MainWindow::onManageTemplates);
-    connect(templateCombo_, &QComboBox::currentIndexChanged, this, [this](int) {
-        refreshTemplatePreview();
+    connect(templateList_, &QListWidget::itemSelectionChanged, this, [this]() {
+        refreshSummary();
         updateUiState(taskManager_.isRunning());
     });
 
@@ -596,168 +371,7 @@ void MainWindow::setupConnections() {
     });
 }
 
-WatermarkConfig MainWindow::styleFromUi() const {
-    WatermarkConfig cfg;
-    cfg.fontSizePt = 24;
-    cfg.rotationDegrees = rotationSpin_->value();
-    cfg.fontFamily = fontCombo_->currentFont().family().toStdString();
-    cfg.fontBold = boldCheck_->isChecked();
-    cfg.fontItalic = italicCheck_->isChecked();
-    cfg.dpi = 200;
-    cfg.jpegQuality = 85;
-    cfg.colorHex = "#808080";
-    cfg.opacity = depthSlider_->value() / 100.0;
-    return cfg;
-}
-
-void MainWindow::applyStyleToUi(const WatermarkConfig& style) {
-    rotationSpin_->setValue(style.rotationDegrees);
-    const QString family = style.fontFamily.empty()
-        ? QStringLiteral("Arial")
-        : QString::fromUtf8(style.fontFamily.c_str());
-    fontCombo_->setCurrentFont(QFont(family));
-    boldCheck_->setChecked(style.fontBold);
-    italicCheck_->setChecked(style.fontItalic);
-
-    const int percent = static_cast<int>(style.opacity * 100.0 + 0.5);
-    {
-        QSignalBlocker blockSlider(depthSlider_);
-        QSignalBlocker blockSpin(depthSpin_);
-        depthSlider_->setValue(percent);
-        depthSpin_->setValue(percent);
-    }
-    depthValueLabel_->setText(depthHintText(percent));
-}
-
-WatermarkConfig MainWindow::currentConfig() const {
-    WatermarkConfig cfg = styleFromUi();
-    // Prefer the first checked, non-empty row so the preview matches what
-    // generating the current PDF will actually produce; else fall back to the
-    WatermarkConfig fallback;
-    bool hasFallback = false;
-    for (int i = 0; i < watermarkLayout_->count(); ++i) {
-        auto* item = watermarkLayout_->itemAt(i);
-        if (auto* row = qobject_cast<WatermarkRow*>(item->widget())) {
-            QString t = row->text().trimmed();
-            if (t.isEmpty()) continue;
-            cfg.text = t.toStdString();
-            if (row->isSelected()) return cfg;
-            if (!hasFallback) {
-                fallback = cfg;
-                hasFallback = true;
-            }
-        }
-    }
-    if (hasFallback) return fallback;
-
-    cfg.text = "";
-    return cfg;
-}
-
-
-void MainWindow::saveCurrentWatermarks() {
-    // The empty key is the global draft used while no PDF is selected, so a
-    // template can be authored without loading any file.
-    const WatermarkConfig style = styleFromUi();
-    std::vector<WatermarkConfig> configs;
-    for (int i = 0; i < watermarkLayout_->count(); ++i) {
-        auto* item = watermarkLayout_->itemAt(i);
-        if (auto* row = qobject_cast<WatermarkRow*>(item->widget())) {
-            QString t = row->text().trimmed();
-            if (t.isEmpty()) continue;
-            WatermarkConfig cfg = style;
-            cfg.text = t.toStdString();
-            cfg.selected = row->isSelected();
-            configs.push_back(cfg);
-        }
-    }
-    fileWatermarkConfigs_[currentSelectedFile_] = configs;
-    // Keep the per-file style template in sync with the live controls so
-    // templates and batch generation always see the same style.
-    perPdfConfigMap_[currentSelectedFile_] = style;
-}
-
-void MainWindow::loadWatermarksForSelectedFile() {
-    // Clear existing rows
-    QLayoutItem* child;
-    while ((child = watermarkLayout_->takeAt(0)) != nullptr) {
-        if (child->widget()) {
-            delete child->widget();
-        }
-        delete child;
-    }
-
-    // Works for key "" too: that is the global draft shown when no PDF is
-    // selected, which is what lets users build a template file-free.
-    // Sync style controls from the stored style (or defaults)
-    auto itStyle = perPdfConfigMap_.find(currentSelectedFile_);
-    if (itStyle != perPdfConfigMap_.end()) {
-        applyStyleToUi(itStyle->second);
-    } else {
-        WatermarkConfig def;
-        def.rotationDegrees = -35.0;
-        def.fontFamily = "Arial";
-        def.fontBold = true;
-        def.fontItalic = false;
-        applyStyleToUi(def);
-    }
-
-    // Load existing watermark configs, or leave empty
-    auto it = fileWatermarkConfigs_.find(currentSelectedFile_);
-    const std::vector<WatermarkConfig> emptyList;
-    const auto& cfgs = (it != fileWatermarkConfigs_.end()) ? it->second : emptyList;
-    for (const auto& cfg : cfgs) {
-        int idx = nextWatermarkIndex_++;
-        auto* row = new WatermarkRow(QString::fromStdString(cfg.text), idx, watermarkContainer_);
-        // Restore the saved checkbox state before wiring signals, so loading
-        // rows does not trigger a save while the list is still being rebuilt.
-        row->setSelected(cfg.selected);
-        connect(row, &WatermarkRow::textChanged, this, &MainWindow::onWatermarkTextChanged);
-        connect(row, &WatermarkRow::removeRequested, this, &MainWindow::removeWatermarkRow);
-        connect(row, &WatermarkRow::selectionChanged, this, &MainWindow::onWatermarkSelectionChanged);
-        watermarkLayout_->addWidget(row);
-    }
-    watermarkLayout_->addStretch();
-}
-void MainWindow::addWatermarkRow() {
-    if (currentSelectedFile_.isEmpty()) return;
-    int idx = nextWatermarkIndex_++;
-    auto* row = new WatermarkRow("", idx, watermarkContainer_);
-    connect(row, &WatermarkRow::textChanged, this, &MainWindow::onWatermarkTextChanged);
-    connect(row, &WatermarkRow::removeRequested, this, &MainWindow::removeWatermarkRow);
-
-    // Insert before the trailing stretch item
-    int count = watermarkLayout_->count();
-    watermarkLayout_->insertWidget(std::max(0, count - 1), row);
-    saveCurrentWatermarks();
-}
-void MainWindow::removeWatermarkRow(int index) {
-    for (int i = 0; i < watermarkLayout_->count(); ++i) {
-        auto* item = watermarkLayout_->itemAt(i);
-        if (auto* row = qobject_cast<WatermarkRow*>(item->widget())) {
-            if (row->index() == index) {
-                delete row;
-                break;
-            }
-        }
-    }
-    saveCurrentWatermarks();
-    updateUiState(taskManager_.isRunning());
-}
-
-void MainWindow::onWatermarkTextChanged() {
-    saveCurrentWatermarks();
-    updateUiState(taskManager_.isRunning());
-}
-
-void MainWindow::onWatermarkSelectionChanged() {
-    saveCurrentWatermarks();
-    updateUiState(taskManager_.isRunning());
-}
-
 void MainWindow::onFileSelectionChanged() {
-    saveCurrentWatermarks();
-
     auto items = fileTable_->selectedItems();
     if (items.isEmpty()) {
         currentSelectedFile_.clear();
@@ -765,9 +379,7 @@ void MainWindow::onFileSelectionChanged() {
         int row = fileTable_->row(items.first());
         currentSelectedFile_ = pathAt(row);
     }
-    loadWatermarksForSelectedFile();
-    refreshScopeLabel();
-    refreshActionLabels();
+    refreshSummary();
     updateUiState(false);
 }
 
@@ -848,16 +460,11 @@ void MainWindow::onClearFiles() {
         if (answer != QMessageBox::Yes) return;
     }
     fileTable_->setRowCount(0);
-    // Keep the global draft (key "") so a half-authored template survives.
-    std::erase_if(fileWatermarkConfigs_, [](const auto& kv) { return !kv.first.isEmpty(); });
-    std::erase_if(perPdfConfigMap_, [](const auto& kv) { return !kv.first.isEmpty(); });
     currentSelectedFile_.clear();
     fileNameToRow_.clear();
     taskManager_.clear();
     totalProgressBar_->setValue(0);
-    loadWatermarksForSelectedFile();
-    refreshScopeLabel();
-    refreshActionLabels();
+    refreshSummary();
     updateUiState(false);
     statusLabel_->setText("列表已清空。");
 }
@@ -873,54 +480,6 @@ void MainWindow::onCancelClicked() {
     taskManager_.cancel();
     statusLabel_->setText("正在取消任务...");
 }
-void MainWindow::updateUiState(bool running) {
-    cancelBtn_->setEnabled(running);
-
-    const bool hasTemplate = templateCombo_ && !templateCombo_->currentData().toString().isEmpty();
-    const bool hasFile = !currentSelectedFile_.isEmpty();
-    const bool hasRows = fileTable_->rowCount() > 0;
-
-    // The checkbox column decides the batch scope, so the only gate for
-    // "生成勾选的 PDF" is having something checked (plus a template in
-    // template mode, which is applied automatically).
-    const int checked = checkedCount();
-    const bool tplMode = isTemplateMode();
-    if (tplMode) {
-        startCheckedBtn_->setEnabled(!running && checked > 0 && hasTemplate);
-        startAllBtn_->setEnabled(!running && hasRows && hasTemplate);
-    } else {
-        startCheckedBtn_->setEnabled(!running && checked > 0);
-        startAllBtn_->setEnabled(!running && hasRows);
-    }
-    selectAllBtn_->setEnabled(!running && hasRows);
-    selectNoneBtn_->setEnabled(!running && hasRows);
-
-    // Mode switch
-    modeTemplateBtn_->setEnabled(!running);
-    modeCustomBtn_->setEnabled(!running);
-
-    // Template-mode page
-    templateCombo_->setEnabled(!running);
-    manageTemplateBtn_->setEnabled(!running);
-    gotoCustomBtn_->setEnabled(!running);
-
-    // Custom-mode page. Editing is always allowed: with no PDF selected the
-    // rows are the global draft used to create a template.
-    addWatermarkBtn_->setEnabled(!running);
-    loadTemplateBtn_->setEnabled(!running && !templateStore_.templates().empty());
-    saveTemplateBtn_->setEnabled(!running && hasAnyWatermarkRow());
-    depthSlider_->setEnabled(!running);
-    depthSpin_->setEnabled(!running);
-    rotationSpin_->setEnabled(!running);
-    fontCombo_->setEnabled(!running);
-    boldCheck_->setEnabled(!running);
-    italicCheck_->setEnabled(!running);
-
-    // Shared
-    previewBtn_->setEnabled(!running);
-    outputDirEdit_->setEnabled(!running);
-}
-
 void MainWindow::onRemoveSelectedFile() {
     if (taskManager_.isRunning()) return;
 
@@ -947,8 +506,6 @@ void MainWindow::onRemoveSelectedFile() {
         const QString filePath = pathAt(row);
         if (filePath.isEmpty()) continue;
         fileTable_->removeRow(row);
-        fileWatermarkConfigs_.erase(filePath);
-        perPdfConfigMap_.erase(filePath);
         if (currentSelectedFile_ == filePath) {
             currentSelectedFile_.clear();
         }
@@ -960,11 +517,11 @@ void MainWindow::onRemoveSelectedFile() {
         // removed row; select whatever row now occupies that position.
         int anchor = std::min(selectedRows.last(), remaining - 1);
         fileTable_->selectRow(std::max(0, anchor));
-    } else {
-        loadWatermarksForSelectedFile();
     }
 
     rebuildFileIndex();
+    refreshSummary();
+    updateUiState(taskManager_.isRunning());
     statusLabel_->setText(QString("已移除 %1 个文件。剩余 %2 个文件。")
         .arg(selectedRows.size()).arg(remaining));
 }
@@ -1027,11 +584,6 @@ void MainWindow::setPagesAt(int row, int pages) {
     if (QTableWidgetItem* item = fileTable_->item(row, kNameColumn)) {
         item->setData(kPagesRole, pages);
     }
-}
-
-QString MainWindow::statusAt(int row) const {
-    QTableWidgetItem* item = fileTable_->item(row, kNameColumn);
-    return item ? item->data(kStatusRole).toString() : QString();
 }
 
 void MainWindow::setStatus(int row, const QString& status, const QString& tooltip) {
@@ -1125,7 +677,7 @@ WorkloadEstimate MainWindow::estimateCurrentWorkload(
 
     std::unordered_map<std::string, size_t> indexOf;
     for (const auto& st : subtasks) {
-        in.maxDpi = std::max(in.maxDpi, st.config.dpi);
+        in.maxDpi = std::max(in.maxDpi, st.tpl.style().dpi);
         const std::string key = pathToString(st.input);
         auto it = indexOf.find(key);
         if (it == indexOf.end()) {
@@ -1186,26 +738,19 @@ bool MainWindow::confirmBatchRun(const std::vector<TaskManager::FileSubtask>& su
         ? QStringLiteral("与源文件相同目录（按水印文字自动建子目录）")
         : outputDirEdit_->text().trimmed();
 
-    QString sourceDesc;
-    if (isTemplateMode()) {
-        const WatermarkTemplate tpl = selectedTemplate();
-        sourceDesc = QString("模板「%1」").arg(QString::fromUtf8(tpl.name.c_str()));
-    } else {
-        sourceDesc = QStringLiteral("各文件自己的水印配置（每个文件只含已勾选的水印）");
-    }
-    if (scope == BatchScope::Checked) {
-        sourceDesc += QStringLiteral(" · 范围：勾选的 %1 个 PDF").arg(checkedCount());
-    } else {
-        sourceDesc += QStringLiteral(" · 范围：列表中的全部 %1 个 PDF").arg(fileTable_->rowCount());
-    }
+    const std::vector<WatermarkTemplate> tpls = checkedTemplates();
+    QStringList tplNames;
+    for (const auto& t : tpls) tplNames << QString::fromUtf8(t.name.c_str());
+    const int pdfs = (scope == BatchScope::Checked) ? checkedCount() : fileTable_->rowCount();
+    const QString sourceDesc = QString("%1 个 PDF × %2 个模板 = %3 个输出文件")
+        .arg(pdfs).arg(tpls.size()).arg(subtasks.size());
 
     QString detail = QString(
-        "将生成 %1 个文件（共 %2 个 PDF）\n"
-        "水印来源：%3\n"
-        "输出目录：%4")
-        .arg(subtasks.size())
-        .arg(est.fileCount)
+        "%1\n"
+        "模板：%2\n"
+        "输出目录：%3")
         .arg(sourceDesc)
+        .arg(tplNames.isEmpty() ? QStringLiteral("（无）") : tplNames.join(QStringLiteral("、")))
         .arg(outDir);
 
     detail += "\n" + autoLine;
@@ -1263,32 +808,6 @@ bool MainWindow::confirmBatchRun(const std::vector<TaskManager::FileSubtask>& su
     return true;
 }
 
-std::vector<TaskManager::FileSubtask> MainWindow::buildAllConfigs(BatchScope scope) {
-    saveCurrentWatermarks();
-    std::vector<TaskManager::FileSubtask> subtasks;
-
-    for (int r = 0; r < fileTable_->rowCount(); ++r) {
-        // Scope only decides *which PDFs* take part. The per-watermark
-        // checkboxes are always honoured, so a checkbox means "include this".
-        if (scope == BatchScope::Checked && !isCheckedAt(r)) continue;
-
-        const QString filePath = pathAt(r);
-        if (filePath.isEmpty()) continue;
-        fs::path p = qstringToPath(filePath);
-
-        auto it = fileWatermarkConfigs_.find(filePath);
-        if (it == fileWatermarkConfigs_.end() || it->second.empty()) {
-            continue;
-        }
-        const std::vector<WatermarkConfig> configs = filterSelectedWatermarks(it->second);
-        for (const auto& cfg : configs) {
-            if (cfg.text.empty()) continue;
-            subtasks.push_back({ p, cfg });
-        }
-    }
-    return subtasks;
-}
-
 void MainWindow::onStartAllClicked() {
     runBatch(BatchScope::All);
 }
@@ -1309,36 +828,16 @@ void MainWindow::runBatch(BatchScope scope) {
         return;
     }
 
-    // Template mode: the selected global template is applied automatically, so
-    // the user never has to press "apply" first (and a stale apply can never be
-    // used by accident).
-    if (isTemplateMode()) {
-        const WatermarkTemplate tpl = selectedTemplate();
-        if (!tpl.isValid()) {
-            QMessageBox::warning(this, "提示",
-                "请先选择一个水印模板。\n\n"
-                "还没有模板？点上面的「去「自定义」创建模板」。");
-            return;
-        }
-        if (scope == BatchScope::All) {
-            applyTemplateToAllFiles(tpl);
-        } else {
-            for (const QString& path : checkedPaths()) {
-                applyTemplateToFile(tpl, path);
-            }
-            if (!currentSelectedFile_.isEmpty()) loadWatermarksForSelectedFile();
-        }
+    if (checkedTemplateCount() == 0) {
+        QMessageBox::warning(this, "提示",
+            "请先在上方勾选至少一个水印模板。\n\n"
+            "还没有模板？点「新建模板...」，模板是全局的，不需要先添加 PDF。");
+        return;
     }
 
-    auto subtasks = buildAllConfigs(scope);
+    auto subtasks = buildSubtasks(scope);
     if (subtasks.empty()) {
-        QMessageBox::warning(this, "提示",
-            "没有可生成的水印。\n\n"
-            "可能原因：\n"
-            "  • 勾选的 PDF 还没有水印文字\n"
-            "  • 水印文字前面的复选框没有勾上（勾上才会生成）\n\n"
-            "操作：在「自定义」模式下添加/勾选水印，"
-            "或存成模板后在「模板」模式下生成。");
+        QMessageBox::warning(this, "提示", "没有可生成的组合，请检查勾选的 PDF 与模板。");
         return;
     }
 
@@ -1471,43 +970,209 @@ void MainWindow::onPasswordRequired(const QString& filePath) {
         taskManager_.setPasswords(knownPasswords_);
     }
 }
-void MainWindow::onPreviewWatermark() {
-    WatermarkConfig cfg;
-    if (isTemplateMode()) {
-        const WatermarkTemplate tpl = selectedTemplate();
-        if (!tpl.isValid()) {
-            QMessageBox::information(this, "提示",
-                "请先选择一个水印模板再预览；或在「自定义」中编辑水印后预览。");
+// ── Templates ───────────────────────────────────────────────────────────────
+
+void MainWindow::refreshTemplateList(const QString& select) {
+    if (!templateList_) return;
+    const QString previous = templateList_->currentItem()
+        ? templateList_->currentItem()->data(Qt::UserRole).toString() : QString();
+
+    QSignalBlocker block(templateList_);
+    templateList_->clear();
+    for (const auto& tpl : templateStore_.templates()) {
+        const QString name = QString::fromUtf8(tpl.name.c_str());
+        int lines = 0;
+        QStringList texts;
+        for (const auto& wm : tpl.watermarks) {
+            if (wm.text.empty()) continue;
+            ++lines;
+            texts << QStringLiteral("  • %1").arg(QString::fromUtf8(wm.text.c_str()));
+        }
+        const WatermarkConfig st = tpl.style();
+
+        auto* item = new QListWidgetItem(QString("%1    ·    %2 条 · %3pt · %4° · %5%")
+            .arg(name).arg(lines).arg(st.fontSizePt)
+            .arg(st.rotationDegrees)
+            .arg(static_cast<int>(st.opacity * 100.0 + 0.5)));
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        // Set the state before insertion so building the list emits no signals.
+        item->setCheckState(Qt::Checked);
+        item->setData(Qt::UserRole, name);
+        item->setToolTip(QString("模板「%1」\n水印文字：\n%2\n\n勾选 = 参与生成；模板名即输出子目录名")
+            .arg(name).arg(texts.join("\n")));
+        templateList_->addItem(item);
+    }
+
+    QString want = select.isEmpty() ? previous : select;
+    int row = -1;
+    for (int i = 0; i < templateList_->count(); ++i) {
+        if (templateList_->item(i)->data(Qt::UserRole).toString() == want) { row = i; break; }
+    }
+    if (row < 0 && templateList_->count() > 0) row = 0;
+    if (row >= 0) templateList_->setCurrentRow(row);
+    templateList_->blockSignals(false);
+
+    refreshSummary();
+    refreshActionLabels();
+}
+
+WatermarkTemplate MainWindow::selectedTemplate() const {
+    if (!templateList_ || !templateList_->currentItem()) return WatermarkTemplate{};
+    const QString name = templateList_->currentItem()->data(Qt::UserRole).toString();
+    const WatermarkTemplate* found = templateStore_.find(name);
+    return found ? *found : WatermarkTemplate{};
+}
+
+bool MainWindow::isTemplateCheckedAt(int row) const {
+    QListWidgetItem* item = templateList_ ? templateList_->item(row) : nullptr;
+    return item && item->checkState() == Qt::Checked;
+}
+
+void MainWindow::setTemplateChecked(int row, bool on) {
+    if (QListWidgetItem* item = templateList_ ? templateList_->item(row) : nullptr) {
+        item->setCheckState(on ? Qt::Checked : Qt::Unchecked);
+    }
+}
+
+std::vector<WatermarkTemplate> MainWindow::checkedTemplates() const {
+    std::vector<WatermarkTemplate> out;
+    if (!templateList_) return out;
+    for (int i = 0; i < templateList_->count(); ++i) {
+        if (!isTemplateCheckedAt(i)) continue;
+        const QString name = templateList_->item(i)->data(Qt::UserRole).toString();
+        const WatermarkTemplate* tpl = templateStore_.find(name);
+        if (tpl && tpl->isValid()) out.push_back(*tpl);
+    }
+    return out;
+}
+
+int MainWindow::checkedTemplateCount() const {
+    if (!templateList_) return 0;
+    int n = 0;
+    for (int i = 0; i < templateList_->count(); ++i) {
+        if (isTemplateCheckedAt(i)) ++n;
+    }
+    return n;
+}
+
+void MainWindow::onTemplateItemChanged() {
+    refreshSummary();
+    refreshActionLabels();
+    updateUiState(taskManager_.isRunning());
+}
+
+void MainWindow::onSelectAllTemplates() {
+    QSignalBlocker block(templateList_);
+    for (int i = 0; i < templateList_->count(); ++i) setTemplateChecked(i, true);
+    onTemplateItemChanged();
+}
+
+void MainWindow::onSelectNoneTemplates() {
+    QSignalBlocker block(templateList_);
+    for (int i = 0; i < templateList_->count(); ++i) setTemplateChecked(i, false);
+    onTemplateItemChanged();
+}
+
+void MainWindow::onNewTemplate() {
+    TemplateEditDialog dlg(WatermarkTemplate{}, true, this);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    WatermarkTemplate tpl = dlg.result();
+    const QString name = QString::fromUtf8(tpl.name.c_str());
+    if (templateStore_.find(name)) {
+        if (QMessageBox::question(this, "覆盖模板",
+                QString("已存在同名模板「%1」，是否覆盖？").arg(name))
+            != QMessageBox::Yes) {
             return;
         }
-        cfg = tpl.style();
-    } else {
-        cfg = currentConfig();
     }
-    if (cfg.text.empty()) {
-        cfg.text = "机密文件 请勿外传";
-    }
+    templateStore_.addOrReplace(tpl);
+    templateStore_.save();
+    refreshTemplateList(name);
+    updateUiState(taskManager_.isRunning());
+    statusLabel_->setText(QString("模板「%1」已保存。").arg(name));
+}
 
-    // Render 600x800 preview (approx standard 3:4 portrait page proportion)
-    QImage previewImg = WatermarkRenderer::renderPreview(600, 800, cfg);
+void MainWindow::onEditTemplate() {
+    const WatermarkTemplate cur = selectedTemplate();
+    if (!cur.isValid()) {
+        QMessageBox::information(this, "提示", "请先在列表中选择一个模板。");
+        return;
+    }
+    TemplateEditDialog dlg(cur, false, this);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    const WatermarkTemplate edited = dlg.result();
+    const QString oldName = QString::fromUtf8(cur.name.c_str());
+    const QString newName = QString::fromUtf8(edited.name.c_str());
+
+    // Ask before touching the store so a declined overwrite loses nothing.
+    if (newName != oldName && templateStore_.find(newName)) {
+        if (QMessageBox::question(this, "覆盖模板",
+                QString("已存在同名模板「%1」，是否覆盖？").arg(newName))
+            != QMessageBox::Yes) {
+            return;
+        }
+    }
+    if (newName != oldName) {
+        templateStore_.remove(oldName);
+    }
+    templateStore_.addOrReplace(edited);
+    templateStore_.save();
+    refreshTemplateList(newName);
+    updateUiState(taskManager_.isRunning());
+    statusLabel_->setText(QString("模板「%1」已更新。").arg(newName));
+}
+
+void MainWindow::onDeleteTemplate() {
+    const WatermarkTemplate cur = selectedTemplate();
+    if (!cur.isValid()) {
+        QMessageBox::information(this, "提示", "请先在列表中选择一个模板。");
+        return;
+    }
+    const QString name = QString::fromUtf8(cur.name.c_str());
+    if (QMessageBox::question(this, "删除模板",
+            QString("确定删除模板「%1」？\n\n已生成的输出文件不会被删除。").arg(name),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) {
+        return;
+    }
+    templateStore_.remove(name);
+    templateStore_.save();
+    refreshTemplateList();
+    updateUiState(taskManager_.isRunning());
+    statusLabel_->setText(QString("模板「%1」已删除。").arg(name));
+}
+
+void MainWindow::onPreviewTemplate() {
+    const WatermarkTemplate tpl = selectedTemplate();
+    if (!tpl.isValid()) {
+        QMessageBox::information(this, "提示", "请先在列表中选择一个模板。");
+        return;
+    }
+    const std::vector<WatermarkConfig> lines = templateToConfigs(tpl);
+    const QImage previewImg = WatermarkRenderer::renderPreview(600, 800, lines);
+    const WatermarkConfig st = tpl.style();
 
     auto* dlg = new QDialog(this);
-    dlg->setWindowTitle("水印效果实时预览");
-    dlg->resize(640, 860);
+    dlg->setWindowTitle(QString("模板预览 - %1").arg(QString::fromUtf8(tpl.name.c_str())));
+    dlg->resize(640, 880);
     auto* layout = new QVBoxLayout(dlg);
     layout->setContentsMargins(12, 12, 12, 12);
     layout->setSpacing(8);
 
-    const QString modeTag = isTemplateMode() ? QStringLiteral("模板预览 · ") : QString();
+    QStringList texts;
+    for (const auto& line : lines) texts << QString::fromUtf8(line.text.c_str());
     auto* infoLabel = new QLabel(
-        modeTag + QString("水印文字：%1   倾斜：%2°   字体：%3   深浅：%4%")
-            .arg(QString::fromUtf8(cfg.text.c_str()))
-            .arg(cfg.rotationDegrees)
-            .arg(QString::fromStdString(cfg.fontFamily))
-            .arg(static_cast<int>(cfg.opacity * 100)),
-        dlg
-    );
-    infoLabel->setStyleSheet("color: #444; font-size: 13px;");
+        QString("模板「%1」 · %2 条水印\n%3\n样式：倾斜 %4° · 字体 %5 · 深浅 %6%")
+            .arg(QString::fromUtf8(tpl.name.c_str()))
+            .arg(texts.size())
+            .arg(texts.join(QStringLiteral("、  ")))
+            .arg(st.rotationDegrees)
+            .arg(QString::fromUtf8(st.fontFamily.c_str()))
+            .arg(static_cast<int>(st.opacity * 100.0 + 0.5)),
+        dlg);
+    infoLabel->setWordWrap(true);
+    infoLabel->setStyleSheet("color:#444; font-size:13px;");
     layout->addWidget(infoLabel);
 
     auto* imgLabel = new QLabel(dlg);
@@ -1526,321 +1191,89 @@ void MainWindow::onPreviewWatermark() {
     layout->addLayout(btnBox);
 
     dlg->exec();
+    delete dlg;
 }
 
+void MainWindow::refreshSummary() {
+    if (!summaryLabel_) return;
+    const int files = checkedCount();
+    const int totalFiles = fileTable_->rowCount();
+    const int tpls = checkedTemplateCount();
+    const int totalTpls = templateList_ ? templateList_->count() : 0;
 
-// ── Watermark templates ─────────────────────────────────────────────────────
-
-void MainWindow::refreshTemplateCombo(const QString& select) {
-    if (!templateCombo_) return;
-    const QString previous = templateCombo_->currentData().toString();
-
-    templateCombo_->blockSignals(true);
-    templateCombo_->clear();
-    templateCombo_->addItem(QStringLiteral("（选择模板）"), QString());
-    for (const auto& tpl : templateStore_.templates()) {
-        const QString name = QString::fromUtf8(tpl.name.c_str());
-        templateCombo_->addItem(name, name);
+    if (totalTpls == 0) {
+        summaryLabel_->setText(
+            "还没有水印模板。\n\n"
+            "模板是全局的（与 PDF 无关）：点「新建模板...」创建，"
+            "模板名会作为输出子目录名（建议用公司名或用途）。");
+        return;
     }
-    QString want = select.isEmpty() ? previous : select;
-    int idx = want.isEmpty() ? 0 : templateCombo_->findData(want);
-    if (idx < 0) idx = 0;
-    // Nothing was selected yet but templates exist: default to the first one so
-    // the app is usable immediately instead of showing an empty state.
-    if (idx == 0 && select.isEmpty() && previous.isEmpty() && templateCombo_->count() > 1) {
-        idx = 1;
-    }
-    templateCombo_->setCurrentIndex(idx);
-    templateCombo_->blockSignals(false);
-
-    refreshTemplatePreview();
-    refreshScopeLabel();
-    refreshActionLabels();
-
-    // Enablement of the template buttons depends on whether a template is
-    // selected, so refresh it here as well.
-    updateUiState(taskManager_.isRunning());
-}
-
-bool MainWindow::hasAnyWatermarkRow() const {
-    if (!watermarkLayout_) return false;
-    for (int i = 0; i < watermarkLayout_->count(); ++i) {
-        auto* item = watermarkLayout_->itemAt(i);
-        if (auto* row = qobject_cast<WatermarkRow*>(item->widget())) {
-            if (!row->text().trimmed().isEmpty()) return true;
-        }
-    }
-    return false;
-}
-
-bool MainWindow::isTemplateMode() const {
-    return modeTemplateBtn_ && modeTemplateBtn_->isChecked();
-}
-
-void MainWindow::onWatermarkModeChanged() {
-    if (!watermarkModeStack_) return;
-    watermarkModeStack_->setCurrentIndex(isTemplateMode() ? 0 : 1);
-    if (isTemplateMode()) refreshTemplatePreview();
-    refreshScopeLabel();
-    refreshActionLabels();
-    updateUiState(taskManager_.isRunning());
+    summaryLabel_->setText(QString(
+        "PDF：%1 / %2 个已勾选\n"
+        "模板：%3 / %4 个已勾选\n"
+        "本次输出：%5 个文件（%1 × %3），每个模板一个目录")
+        .arg(files).arg(totalFiles).arg(tpls).arg(totalTpls).arg(files * tpls));
 }
 
 void MainWindow::refreshActionLabels() {
     if (!startAllBtn_ || !startCheckedBtn_) return;
-
     const int files = checkedCount();
-    const bool tplMode = isTemplateMode();
+    const int allFiles = fileTable_->rowCount();
+    const int tpls = checkedTemplateCount();
 
     startCheckedBtn_->setText(files > 0
-        ? QString("生成勾选的 PDF（%1 个）").arg(files)
+        ? QString("生成 %1 个输出（%2 PDF × %3 模板）").arg(files * tpls).arg(files).arg(tpls)
         : QString("生成勾选的 PDF"));
-    startAllBtn_->setText("生成全部 PDF");
+    startAllBtn_->setText(allFiles > 0
+        ? QString("生成全部 PDF（%1 × %2 = %3 个输出）").arg(allFiles).arg(tpls).arg(allFiles * tpls)
+        : QString("生成全部 PDF"));
 
-    if (tplMode) {
-        const WatermarkTemplate tpl = selectedTemplate();
-        int perFile = 0;
-        for (const auto& wm : tpl.watermarks) {
-            if (!wm.text.empty() && wm.selected) perFile++;
-        }
-        startCheckedBtn_->setToolTip(QString(
-            "把模板「%1」套用到左侧勾选的 %2 个 PDF 并生成（每份 %3 条水印）")
-            .arg(tpl.isValid() ? QString::fromUtf8(tpl.name.c_str()) : QStringLiteral("未选择"))
-            .arg(files)
-            .arg(perFile));
-        startAllBtn_->setToolTip("把所选模板套用到列表中的所有 PDF 并生成");
-    } else {
-        startCheckedBtn_->setToolTip(QString(
-            "只生成左侧勾选的 %1 个 PDF（每个文件只生成它自己勾选的水印）").arg(files));
-        startAllBtn_->setToolTip("生成列表中的所有 PDF（各自只生成已勾选的水印）");
-    }
+    startCheckedBtn_->setToolTip(QString("勾选的 %1 个 PDF × %2 个模板 → 输出 %3 个文件")
+        .arg(files).arg(tpls).arg(files * tpls));
+    startAllBtn_->setToolTip(QString("列表中全部 %1 个 PDF × %2 个模板 → 输出 %3 个文件")
+        .arg(allFiles).arg(tpls).arg(allFiles * tpls));
 }
 
-void MainWindow::refreshScopeLabel() {
-    if (!scopeLabel_) return;
+std::vector<TaskManager::FileSubtask> MainWindow::buildSubtasks(BatchScope scope) {
+    std::vector<TaskManager::FileSubtask> subtasks;
+    const std::vector<WatermarkTemplate> tpls = checkedTemplates();
+    if (tpls.empty()) return subtasks;
 
-    if (!isTemplateMode()) {
-        const bool noFile = currentSelectedFile_.isEmpty();
-        customHintLabel_->setVisible(noFile);
-        if (noFile) {
-            customHintLabel_->setText(
-                "未选择 PDF：这里编辑的是全局草稿，可直接「存为模板」；"
-                "选中某个 PDF 后，编辑的就是那个文件专属的水印。");
-        }
-    } else {
-        customHintLabel_->setVisible(false);
-    }
-
-    if (isTemplateMode()) {
-        const WatermarkTemplate tpl = selectedTemplate();
-        scopeLabel_->setText(QString("作用域：全部 %1 个 PDF · 模板「%2」")
-            .arg(fileTable_->rowCount())
-            .arg(tpl.isValid() ? QString::fromUtf8(tpl.name.c_str()) : QStringLiteral("未选择")));
-        scopeLabel_->setStyleSheet(tpl.isValid()
-            ? "color:#666666; font-size:12px;"
-            : "color:#b26a00; font-size:12px; font-weight:bold;");
-    } else if (currentSelectedFile_.isEmpty()) {
-        scopeLabel_->setText("作用域：全局草稿（未选择 PDF）");
-        scopeLabel_->setStyleSheet("color:#0078d4; font-size:12px;");
-    } else {
-        scopeLabel_->setText(QString("作用域：当前 PDF · %1").arg(QFileInfo(currentSelectedFile_).fileName()));
-        scopeLabel_->setStyleSheet("color:#666666; font-size:12px;");
-    }
-}
-
-WatermarkTemplate MainWindow::selectedTemplate() const {
-    const QString name = templateCombo_ ? templateCombo_->currentData().toString() : QString();
-    if (name.isEmpty()) return WatermarkTemplate{};
-    const WatermarkTemplate* found = templateStore_.find(name);
-    return found ? *found : WatermarkTemplate{};
-}
-
-void MainWindow::refreshTemplatePreview() {
-    if (!tplPreviewLabel_) return;
-
-    const bool anyTemplates = !templateStore_.templates().empty();
-    const WatermarkTemplate tpl = selectedTemplate();
-    if (gotoCustomBtn_) gotoCustomBtn_->setVisible(!anyTemplates);
-    if (!tpl.isValid()) {
-        tplPreviewLabel_->setText(anyTemplates
-            ? "请在上方选择一个水印模板。"
-            : "还没有可用模板。\n\n"
-              "模板是全局的（与具体 PDF 无关）：在「自定义」里写好水印文字与样式，"
-              "点「存为模板...」即可保存，之后在这里选用。");
-        refreshScopeLabel();
-        refreshActionLabels();
-        return;
-    }
-
-    QStringList lines;
-    for (const auto& wm : tpl.watermarks) {
-        if (wm.text.empty()) continue;
-        lines << QString("  • %1%2")
-            .arg(QString::fromUtf8(wm.text.c_str()))
-            .arg(wm.selected ? QString() : QStringLiteral("（未勾选）"));
-    }
-    const WatermarkConfig st = tpl.style();
-    tplPreviewLabel_->setText(
-        QString("共 %1 条水印：\n%2\n\n样式：字号 %3pt · 倾斜 %4° · 深浅 %5% · 字体 %6%7%8")
-            .arg(lines.size())
-            .arg(lines.join("\n"))
-            .arg(st.fontSizePt)
-            .arg(st.rotationDegrees)
-            .arg(static_cast<int>(st.opacity * 100.0 + 0.5))
-            .arg(QString::fromUtf8(st.fontFamily.c_str()))
-            .arg(st.fontBold ? QStringLiteral(" · 加粗") : QString())
-            .arg(st.fontItalic ? QStringLiteral(" · 斜体") : QString()));
-    refreshScopeLabel();
-    refreshActionLabels();
-}
-
-int MainWindow::applyTemplateToAllFiles(const WatermarkTemplate& tpl) {
-    int applied = 0;
+    // Many-to-many: every selected PDF is produced once per checked template.
     for (int r = 0; r < fileTable_->rowCount(); ++r) {
-        const QString path = pathAt(r);
-        if (path.isEmpty()) continue;
-        applyTemplateToFile(tpl, path);
-        ++applied;
-    }
-    if (!currentSelectedFile_.isEmpty()) {
-        loadWatermarksForSelectedFile();
-    }
-    return applied;
-}
-
-WatermarkTemplate MainWindow::currentUiAsTemplate(const QString& name) const {
-    WatermarkTemplate tpl;
-    tpl.name = name.toUtf8().toStdString();
-    const WatermarkConfig style = styleFromUi();
-    for (int i = 0; i < watermarkLayout_->count(); ++i) {
-        auto* item = watermarkLayout_->itemAt(i);
-        if (auto* row = qobject_cast<WatermarkRow*>(item->widget())) {
-            const QString t = row->text().trimmed();
-            if (t.isEmpty()) continue;
-            WatermarkConfig cfg = style;
-            cfg.text = t.toStdString();
-            cfg.selected = row->isSelected();
-            tpl.watermarks.push_back(cfg);
+        if (scope == BatchScope::Checked && !isCheckedAt(r)) continue;
+        const QString p = pathAt(r);
+        if (p.isEmpty()) continue;
+        const fs::path path = qstringToPath(p);
+        for (const auto& tpl : tpls) {
+            subtasks.push_back({path, tpl});
         }
     }
-    return tpl;
+    return subtasks;
 }
 
-void MainWindow::applyTemplateToFile(const WatermarkTemplate& tpl, const QString& filePath) {
-    // An empty filePath means the global draft (no PDF selected).
-    fileWatermarkConfigs_[filePath] = templateToConfigs(tpl);
-    perPdfConfigMap_[filePath] = tpl.style();
-}
+void MainWindow::updateUiState(bool running) {
+    cancelBtn_->setEnabled(running);
 
-void MainWindow::applyTemplateToCurrentUi(const WatermarkTemplate& tpl) {
-    applyTemplateToFile(tpl, currentSelectedFile_);   // "" = draft
-    loadWatermarksForSelectedFile();
-    updateUiState(taskManager_.isRunning());
-}
+    const int files = checkedCount();
+    const bool hasRows = fileTable_->rowCount() > 0;
+    const int tpls = checkedTemplateCount();
+    const bool hasSel = selectedTemplate().isValid();
 
-void MainWindow::loadTemplateByName(const QString& name) {
-    const WatermarkTemplate* tpl = templateStore_.find(name);
-    if (!tpl) {
-        refreshTemplateCombo();
-        return;
-    }
-    applyTemplateToCurrentUi(*tpl);
-    statusLabel_->setText(currentSelectedFile_.isEmpty()
-        ? QString("已把模板「%1」载入草稿编辑区（未选择 PDF）。").arg(name)
-        : QString("已把模板「%1」载入当前 PDF 的编辑区，可继续微调。").arg(name));
-}
+    startCheckedBtn_->setEnabled(!running && files > 0 && tpls > 0);
+    startAllBtn_->setEnabled(!running && hasRows && tpls > 0);
+    selectAllBtn_->setEnabled(!running && hasRows);
+    selectNoneBtn_->setEnabled(!running && hasRows);
 
-void MainWindow::onSaveAsTemplate() {
-    // No name prompt: the name is derived from the watermark text. Works with
-    // or without a selected PDF (no file => the global draft is saved).
-    WatermarkTemplate tpl = currentUiAsTemplate(QString());
-    if (!tpl.isValid()) {
-        QMessageBox::warning(this, "提示",
-            "请先添加至少一个水印文字，再保存为模板。");
-        return;
-    }
+    newTemplateBtn_->setEnabled(!running);
+    editTemplateBtn_->setEnabled(!running && hasSel);
+    deleteTemplateBtn_->setEnabled(!running && hasSel);
+    previewTemplateBtn_->setEnabled(!running && hasSel);
+    selectAllTemplatesBtn_->setEnabled(!running && templateList_->count() > 0);
+    selectNoneTemplatesBtn_->setEnabled(!running && templateList_->count() > 0);
+    templateList_->setEnabled(!running);
 
-    const QString name = QString::fromUtf8(templateNameFromConfigs(tpl.watermarks).c_str());
-    if (name.isEmpty()) {
-        QMessageBox::warning(this, "提示", "水印文字为空，无法生成模板名称。");
-        return;
-    }
-    tpl.name = name.toUtf8().toStdString();
-
-    if (templateStore_.find(name)) {
-        if (QMessageBox::question(this, "覆盖模板",
-                QString("已存在同名模板「%1」（按水印文字自动命名），是否覆盖？").arg(name))
-                != QMessageBox::Yes) {
-            return;
-        }
-    }
-
-    templateStore_.addOrReplace(tpl);
-    templateStore_.save();
-    refreshTemplateCombo(name);
-    updateUiState(taskManager_.isRunning());
-    statusLabel_->setText(currentSelectedFile_.isEmpty()
-        ? QString("模板「%1」已保存（名称取自水印文字）。").arg(name)
-        : QString("模板「%1」已保存（名称取自水印文字，全局模板）。").arg(name));
-}
-
-void MainWindow::onManageTemplates() {
-    QDialog dlg(this);
-    dlg.setWindowTitle("管理水印模板");
-    dlg.resize(420, 340);
-    auto* layout = new QVBoxLayout(&dlg);
-    layout->setContentsMargins(12, 12, 12, 12);
-    layout->setSpacing(8);
-
-    auto* list = new QListWidget(&dlg);
-    for (const auto& tpl : templateStore_.templates()) {
-        list->addItem(QString::fromUtf8(tpl.name.c_str()));
-    }
-    layout->addWidget(list, 1);
-
-    auto* btnRow = new QHBoxLayout();
-    auto* renameBtn = new QPushButton("重命名...", &dlg);
-    auto* deleteBtn = new QPushButton("删除", &dlg);
-    deleteBtn->setStyleSheet("color: #cc0000;");
-    auto* closeBtn = new QPushButton("关闭", &dlg);
-    btnRow->addWidget(renameBtn);
-    btnRow->addWidget(deleteBtn);
-    btnRow->addStretch();
-    btnRow->addWidget(closeBtn);
-    layout->addLayout(btnRow);
-
-    connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
-    connect(renameBtn, &QPushButton::clicked, &dlg, [&]() {
-        auto* cur = list->currentItem();
-        if (!cur) return;
-        const QString oldName = cur->text();
-        bool ok = false;
-        const QString newName = QInputDialog::getText(&dlg, "重命名模板", "新名称：",
-            QLineEdit::Normal, oldName, &ok).trimmed();
-        if (!ok || newName.isEmpty() || newName == oldName) return;
-        if (!templateStore_.rename(oldName, newName)) {
-            QMessageBox::warning(&dlg, "提示", QString("模板「%1」已存在或名称无效。").arg(newName));
-            return;
-        }
-        templateStore_.save();
-        cur->setText(newName);
-        refreshTemplateCombo(newName);
-    });
-    connect(deleteBtn, &QPushButton::clicked, &dlg, [&]() {
-        auto* cur = list->currentItem();
-        if (!cur) return;
-        const QString name = cur->text();
-        if (QMessageBox::question(&dlg, "删除模板",
-                QString("确定删除模板「%1」？").arg(name)) != QMessageBox::Yes) {
-            return;
-        }
-        templateStore_.remove(name);
-        templateStore_.save();
-        delete cur;
-        refreshTemplateCombo();
-    });
-
-    dlg.exec();
+    outputDirEdit_->setEnabled(!running);
 }
 
 void MainWindow::onOpenOutputFolder() {

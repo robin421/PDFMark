@@ -6,7 +6,6 @@ add_executable(pdfmark_tests
     WatermarkTileLayoutTest.cpp
     WatermarkVisualTest.cpp
     WatermarkConfigTest.cpp
-    WatermarkSelectionTest.cpp
     MemoryModelTest.cpp
     CommonTest.cpp
     MultiWatermarkBatchTest.cpp
@@ -34,9 +33,6 @@ add_test(NAME WatermarkVisualTest COMMAND pdfmark_tests --test WatermarkVisual)
 
 # Config validation test
 add_test(NAME WatermarkConfigTest COMMAND pdfmark_tests --test WatermarkConfig)
-
-# Per-watermark selection filter test
-add_test(NAME WatermarkSelectionTest COMMAND pdfmark_tests --test WatermarkSelection)
 
 # Memory model test
 add_test(NAME MemoryModelTest COMMAND pdfmark_tests --test MemoryModel)

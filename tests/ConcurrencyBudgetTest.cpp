@@ -72,14 +72,19 @@ RunOutcome runBatch(const fs::path& workDir,
                     PerformanceMode mode) {
     RunOutcome outcome;
 
-    WatermarkConfig cfg;
-    cfg.text = "CONCURRENCY TEST";
-    cfg.dpi = 72;
+    WatermarkTemplate tpl;
+    {
+        WatermarkConfig cfg;
+        cfg.text = "CONCURRENCY TEST";
+        cfg.dpi = 72;
+        tpl.watermarks.push_back(cfg);
+        tpl.name = templateNameFromConfigs(tpl.watermarks);
+    }
 
     std::vector<TaskManager::FileSubtask> subtasks;
     subtasks.reserve(inputs.size());
     for (const auto& p : inputs) {
-        subtasks.push_back({p, cfg});
+        subtasks.push_back({p, tpl});
     }
 
     TaskManager tm;
@@ -169,13 +174,18 @@ void testConcurrencyBudget() {
 
     // ── ConcurrencyPolicy drives the window; the runtime budget shrinks it ──
     {
-        WatermarkConfig cfg;
-        cfg.text = "ADAPTIVE";
-        cfg.dpi = 72;
+        WatermarkTemplate tpl;
+        {
+            WatermarkConfig cfg;
+            cfg.text = "ADAPTIVE";
+            cfg.dpi = 72;
+            tpl.watermarks.push_back(cfg);
+            tpl.name = templateNameFromConfigs(tpl.watermarks);
+        }
 
         std::vector<TaskManager::FileSubtask> subtasks;
         subtasks.reserve(inputs.size());
-        for (const auto& p : inputs) subtasks.push_back({p, cfg});
+        for (const auto& p : inputs) subtasks.push_back({p, tpl});
 
         TaskManager tm;
         tm.setSubtasks(subtasks);
@@ -205,6 +215,60 @@ void testConcurrencyBudget() {
         assert(tm.observedRss() > 0);
         std::cout << "  adaptive run: window " << tm.effectiveConcurrency() << " -> "
                   << tm.currentWindow() << ", peak=" << tm.peakConcurrentDocuments() << "\n";
+    }
+
+    // ── One template == one output document, all lines overlaid ───────────
+    {
+        WatermarkTemplate multi;
+        for (const char* t : {"ALPHA", "BETA", "GAMMA"}) {
+            WatermarkConfig c;
+            c.text = t;
+            c.dpi = 72;
+            multi.watermarks.push_back(c);
+        }
+        multi.name = "MULTI-TEMPLATE";
+
+        TaskManager tm;
+        tm.setSubtasks({{inputs[0], multi}});
+        tm.setOutputDirectory(workDir / "out_multi");
+        tm.setConcurrencyPolicy(ConcurrencyPolicy{});
+
+        bool finished = false;
+        std::vector<FileResult> got;
+        QEventLoop loop;
+        QObject::connect(&tm, &TaskManager::allFinished, &loop,
+                         [&](const std::vector<FileResult>& r) { got = r; finished = true; loop.quit(); });
+        QTimer::singleShot(60000, &loop, [&]() { loop.quit(); });
+
+        tm.start();
+        loop.exec();
+
+        assert(finished);
+        assert(got.size() == 1);          // 3 lines, still ONE output
+        assert(got[0].success);
+        assert(got[0].watermarkText == "MULTI-TEMPLATE");
+        std::cout << "  multi-line template: " << multi.watermarks.size()
+                  << " lines -> " << got.size() << " output(s), subdir="
+                  << got[0].outputPath.parent_path().filename().string() << "\n";
+
+        // Many-to-many: 1 PDF x 3 templates => 3 outputs.
+        WatermarkTemplate a = multi, b = multi, c = multi;
+        a.name = "T-A"; b.name = "T-B"; c.name = "T-C";
+        TaskManager tm2;
+        tm2.setSubtasks({{inputs[0], a}, {inputs[0], b}, {inputs[0], c}});
+        tm2.setOutputDirectory(workDir / "out_m2m");
+        std::vector<FileResult> got2;
+        bool finished2 = false;
+        QEventLoop loop2;
+        QObject::connect(&tm2, &TaskManager::allFinished, &loop2,
+                         [&](const std::vector<FileResult>& r) { got2 = r; finished2 = true; loop2.quit(); });
+        QTimer::singleShot(60000, &loop2, [&]() { loop2.quit(); });
+        tm2.start();
+        loop2.exec();
+        assert(finished2);
+        assert(got2.size() == 3);         // 1 PDF x 3 templates
+        for (const auto& r : got2) assert(r.success);
+        std::cout << "  many-to-many: 1 PDF x 3 templates -> " << got2.size() << " outputs\n";
     }
 
     // Peak RSS must not scale with the batch: the window bounds live memory.

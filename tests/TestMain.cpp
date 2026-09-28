@@ -7,7 +7,6 @@
 namespace pdfmark {
     void testCommonUtilities();
     void testWatermarkConfig();
-    void testWatermarkSelection();
     void testTileLayout();
     void testWatermarkVisual(const std::filesystem::path& outputDir);
     void testMemoryModel();
@@ -38,9 +37,6 @@ int main(int argc, char* argv[]) {
         }
         if (testName == "ALL" || testName == "WatermarkConfig") {
             pdfmark::testWatermarkConfig();
-        }
-        if (testName == "ALL" || testName == "WatermarkSelection") {
-            pdfmark::testWatermarkSelection();
         }
         if (testName == "ALL" || testName == "TileLayout") {
             pdfmark::testTileLayout();

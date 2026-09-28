@@ -1,7 +1,6 @@
 // PDFMark - Tests for reusable watermark templates and their JSON store.
 #include "watermark/WatermarkTemplate.h"
 #include "watermark/WatermarkTemplateStore.h"
-#include "watermark/WatermarkSelection.h"
 #include "common/Common.h"
 
 #include <cassert>
@@ -132,16 +131,39 @@ void testWatermarkTemplate() {
         assert(store.save());
     }
 
-    // ── template -> per-file configs + "生成所选" filtering ────────────────
+    // ── template -> per-file configs ──────────────────────────────────────
     {
+        // Line-level "selected" is no longer part of the model: every line of a
+        // template is applied, and the checkbox lives on the template itself.
         auto configs = templateToConfigs(tpl);
         assert(configs.size() == 2);
-        // "生成全部" style: every config is a candidate
-        // "生成所选" style: only checked entries survive
-        auto selectedOnly = filterSelectedWatermarks(configs);
-        assert(selectedOnly.size() == 1);
-        assert(selectedOnly[0].text == "机密-张三");
-        assert(selectedOnly[0].dpi == 300);
+        assert(configs[0].text == "机密-张三");
+        assert(configs[0].dpi == 300);
+        assert(configs[1].text == "请勿外传");
+    }
+
+    // ── normalizeTemplate: validation + automatic name ────────────────────
+    {
+        WatermarkTemplate t;
+        WatermarkConfig a; a.text = "  甲公司机密  ";
+        t.watermarks.push_back(a);
+        WatermarkConfig blank; blank.text = "   ";
+        t.watermarks.push_back(blank);
+        assert(normalizeTemplate(t));
+        assert(t.watermarks.size() == 1);              // blank line dropped
+        assert(t.watermarks[0].text == "甲公司机密");   // trimmed
+        assert(t.name == "甲公司机密");                 // name derived
+
+        WatermarkTemplate named;
+        WatermarkConfig b; b.text = "一二三四五六七八";
+        named.watermarks.push_back(b);
+        named.name = "  自定义名  ";
+        assert(normalizeTemplate(named));
+        assert(named.name == "自定义名");               // user name wins, trimmed
+
+        WatermarkTemplate empty;
+        empty.watermarks.push_back(blank);
+        assert(!normalizeTemplate(empty));             // nothing usable
     }
 
     // ── corrupt JSON must degrade to empty, never throw ───────────────────

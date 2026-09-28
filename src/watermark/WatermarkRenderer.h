@@ -4,6 +4,7 @@
 #include "watermark/WatermarkConfig.h"
 #include <QImage>
 #include <QFont>
+#include <vector>
 
 namespace pdfmark {
 
@@ -32,6 +33,10 @@ public:
     // Generates a preview image of specified dimensions (e.g. A4 aspect ratio)
     // with a simulated white document background and the configured watermark.
     static QImage renderPreview(int widthPx, int heightPx, const WatermarkConfig& config);
+
+    // Same, but overlays every line of a template (all sharing one style).
+    static QImage renderPreview(int widthPx, int heightPx,
+                                const std::vector<WatermarkConfig>& configs);
 
 private:
     WatermarkRenderer() = default;

@@ -116,6 +116,39 @@ bool WatermarkRenderer::applyWatermark(QImage& image, const WatermarkConfig& con
     return true;
 }
 
+QImage WatermarkRenderer::renderPreview(int widthPx, int heightPx,
+                                        const std::vector<WatermarkConfig>& configs) {
+    const int canvasW = 800;
+    const int canvasH = 1131;
+
+    QImage preview(canvasW, canvasH, QImage::Format_RGB32);
+    preview.fill(Qt::white);
+    {
+        QPainter p(&preview);
+        p.setPen(QColor(0xDF, 0xDF, 0xDF));
+        p.setBrush(QColor(0xF5, 0xF5, 0xF5));
+        p.drawRect(40, 40, canvasW - 80, 40);
+        int lineY = 120;
+        while (lineY < canvasH - 50) {
+            p.drawLine(50, lineY, canvasW - 50, lineY);
+            lineY += 24;
+        }
+        p.end();
+    }
+
+    for (const auto& cfg : configs) {
+        if (cfg.text.empty()) continue;
+        WatermarkConfig at96 = cfg;
+        at96.dpi = 96;
+        applyWatermark(preview, at96);
+    }
+
+    if (widthPx > 0 && heightPx > 0 && (widthPx != canvasW || heightPx != canvasH)) {
+        return preview.scaled(widthPx, heightPx, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    }
+    return preview;
+}
+
 QImage WatermarkRenderer::renderPreview(int widthPx, int heightPx, const WatermarkConfig& config) {
     // Fixed high-fidelity reference canvas matching standard A4 aspect ratio (800 x 1131 px)
     // This guarantees that preview layout, spacing and font scaling are 100% identical to actual PDF output.

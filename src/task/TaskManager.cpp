@@ -39,6 +39,18 @@ static uint64_t getUniqueTempId() {
     return (pid << 48) ^ (static_cast<uint64_t>(now) << 16) ^ cnt;
 }
 
+namespace {
+// Legacy callers hand us bare WatermarkConfigs; wrap each into a one-line
+// template so the pipeline only ever deals with templates.
+WatermarkTemplate singleLineTemplate(const WatermarkConfig& cfg) {
+    WatermarkTemplate tpl;
+    tpl.watermarks.push_back(cfg);
+    tpl.name = templateNameFromConfigs(tpl.watermarks);
+    if (tpl.name.empty()) tpl.name = "watermark";
+    return tpl;
+}
+} // namespace
+
 TaskManager::TaskManager(QObject* parent)
     : QObject(parent) {
     // Own the pool: setting maxThreadCount on the global instance would affect
@@ -72,7 +84,7 @@ void TaskManager::setSubtasks(const std::vector<FileSubtask>& subtasks) {
     std::lock_guard<std::mutex> lock(mutex_);
     subtasks_ = subtasks;
     if (!subtasks_.empty()) {
-        config_ = subtasks_.front().config;
+        config_ = subtasks_.front().tpl.style();
     }
 }
 
@@ -241,7 +253,7 @@ void TaskManager::processDocumentBatch(const DocumentBatchJob& docJob,
             FileResult res;
             res.inputPath = task.input;
             res.outputPath = task.output;
-            res.watermarkText = task.config.text;
+            res.watermarkText = task.tpl.name;
             res.success = false;
             res.errorMessage = "Operation cancelled";
             {
@@ -264,7 +276,12 @@ void TaskManager::processDocumentBatch(const DocumentBatchJob& docJob,
         const FileTaskItem* task = nullptr;
         fs::path tempOutput;
         PdfDocumentHandle dstDoc;
-        WatermarkRenderer::Stamp stamp;
+        // All lines of the template share one style and go onto the SAME output
+        // document, so each page is encoded once per template.
+        std::vector<WatermarkConfig> lines;
+        std::vector<WatermarkRenderer::Stamp> stamps;
+        int dpi = 200;
+        int jpegQuality = 85;
         double elapsedMs = 0.0;
         std::unique_ptr<ScopedTimer> timer;
     };
@@ -277,7 +294,19 @@ void TaskManager::processDocumentBatch(const DocumentBatchJob& docJob,
             "~" + pathToString(docJob.tasks[k].output.filename()) + "." + std::to_string(uid) + ".tmp");
         contexts[k].timer = std::make_unique<ScopedTimer>(contexts[k].elapsedMs);
         contexts[k].dstDoc = PdfDocument::create();
-        contexts[k].stamp = WatermarkRenderer::createStamp(docJob.tasks[k].config);
+
+        contexts[k].lines = templateToConfigs(docJob.tasks[k].tpl);
+        if (contexts[k].lines.empty()) {
+            WatermarkConfig fallback;
+            fallback.text = docJob.tasks[k].tpl.name;
+            contexts[k].lines.push_back(fallback);
+        }
+        contexts[k].dpi = contexts[k].lines.front().dpi;
+        contexts[k].jpegQuality = contexts[k].lines.front().jpegQuality;
+        contexts[k].stamps.reserve(contexts[k].lines.size());
+        for (const auto& line : contexts[k].lines) {
+            contexts[k].stamps.push_back(WatermarkRenderer::createStamp(line));
+        }
 
         std::error_code ecMkdir;
         fs::create_directories(docJob.tasks[k].output.parent_path(), ecMkdir);
@@ -297,7 +326,7 @@ void TaskManager::processDocumentBatch(const DocumentBatchJob& docJob,
             FileResult res;
             res.inputPath = ctx.task->input;
             res.outputPath = ctx.task->output;
-            res.watermarkText = ctx.task->config.text;
+            res.watermarkText = ctx.task->tpl.name;
             res.success = false;
             res.errorMessage = e.what();
             res.elapsedMs = ctx.elapsedMs;
@@ -325,24 +354,28 @@ void TaskManager::processDocumentBatch(const DocumentBatchJob& docJob,
             double widthPt = PdfDocument::getPageWidth(srcPage.get());
             double heightPt = PdfDocument::getPageHeight(srcPage.get());
 
-            // Single rasterization per page shared across all watermarks
-            int baseDpi = contexts[0].task->config.dpi;
+            // Single rasterization per page, shared by every template.
+            int baseDpi = contexts[0].dpi;
             QImage baseImage = PdfRenderer::rasterizePage(srcPage.get(), baseDpi);
 
             for (size_t k = 0; k < contexts.size(); ++k) {
                 QImage pageImg;
-                if (contexts[k].task->config.dpi == baseDpi) {
+                if (contexts[k].dpi == baseDpi) {
                     if (k == contexts.size() - 1) {
                         pageImg = std::move(baseImage);
                     } else {
                         pageImg = baseImage.copy();
                     }
                 } else {
-                    pageImg = PdfRenderer::rasterizePage(srcPage.get(), contexts[k].task->config.dpi);
+                    pageImg = PdfRenderer::rasterizePage(srcPage.get(), contexts[k].dpi);
                 }
 
-                WatermarkRenderer::applyWatermark(pageImg, contexts[k].task->config, contexts[k].stamp);
-                PdfWriter::appendRasterPage(contexts[k].dstDoc.get(), pageImg, widthPt, heightPt, contexts[k].task->config.jpegQuality);
+                // Overlay every line of this template onto the same page, then
+                // encode that page exactly once.
+                for (size_t j = 0; j < contexts[k].lines.size(); ++j) {
+                    WatermarkRenderer::applyWatermark(pageImg, contexts[k].lines[j], contexts[k].stamps[j]);
+                }
+                PdfWriter::appendRasterPage(contexts[k].dstDoc.get(), pageImg, widthPt, heightPt, contexts[k].jpegQuality);
             }
         } catch (const std::exception& e) {
             batchOk = false;
@@ -374,7 +407,7 @@ void TaskManager::processDocumentBatch(const DocumentBatchJob& docJob,
         FileResult res;
         res.inputPath = ctx.task->input;
         res.outputPath = ctx.task->output;
-        res.watermarkText = ctx.task->config.text;
+        res.watermarkText = ctx.task->tpl.name;
         res.totalPages = totalPages;
         res.elapsedMs = ctx.elapsedMs;
 
@@ -435,7 +468,7 @@ void TaskManager::start() {
                 ? std::vector<WatermarkConfig>{config_} : configs_;
             for (const auto& f : queue_) {
                 for (const auto& c : activeConfigs) {
-                    activeSubtasks.push_back({f, c});
+                    activeSubtasks.push_back({f, singleLineTemplate(c)});
                 }
             }
         }
@@ -457,19 +490,19 @@ void TaskManager::start() {
     for (size_t i = 0; i < activeSubtasks.size(); ++i) {
         const auto& st = activeSubtasks[i];
         int dupIdx = 0;
-        fs::path out = outputPathFor(st.input, st.config.text, dupIdx);
+        fs::path out = outputPathFor(st.input, st.tpl.name, dupIdx);
         while (usedOutputPaths.find(pathToString(out)) != usedOutputPaths.end()) {
             dupIdx++;
-            out = outputPathFor(st.input, st.config.text, dupIdx);
+            out = outputPathFor(st.input, st.tpl.name, dupIdx);
         }
         usedOutputPaths.insert(pathToString(out));
 
         QString fileName = QString::fromUtf8(pathToString(st.input.filename()).c_str());
         QString displayName = QString("%1 [%2]")
             .arg(fileName)
-            .arg(QString::fromUtf8(st.config.text.c_str()));
+            .arg(QString::fromUtf8(st.tpl.name.c_str()));
 
-        allTasks.push_back({st.input, out, st.config, static_cast<int>(i), displayName});
+        allTasks.push_back({st.input, out, st.tpl, static_cast<int>(i), displayName});
     }
 
     // Group tasks by source document to batch rasterization
@@ -614,7 +647,7 @@ void TaskManager::start() {
                         FileResult res;
                         res.inputPath = task.input;
                         res.outputPath = task.output;
-                        res.watermarkText = task.config.text;
+                        res.watermarkText = task.tpl.name;
                         res.success = false;
                         res.errorMessage = "Operation cancelled";
                         {

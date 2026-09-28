@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(PDFMark VERSION 1.2.1 LANGUAGES CXX C)
+project(PDFMark VERSION 1.3.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -86,7 +86,6 @@ add_library(pdfmark_core STATIC
     src/watermark/WatermarkTemplate.h
     src/watermark/WatermarkTemplateStore.h
     src/watermark/WatermarkTemplateStore.cpp
-    src/watermark/WatermarkSelection.h
     src/watermark/WatermarkTileLayout.h
     src/watermark/WatermarkTileLayout.cpp
     src/watermark/WatermarkRenderer.h
@@ -101,6 +100,8 @@ add_library(pdfmark_core STATIC
     src/diagnostics/Diagnostics.cpp
     src/diagnostics/CrashReporter.h
     src/diagnostics/CrashReporter.cpp
+    src/ui/TemplateEditDialog.h
+    src/ui/TemplateEditDialog.cpp
     src/updater/AutoUpdater.h
     src/updater/AutoUpdater.cpp
     src/updater/UpdateDialog.h

@@ -66,6 +66,31 @@ inline std::string templateNameFromConfigs(const std::vector<WatermarkConfig>& c
     return text;
 }
 
+// Trims every line and derives a name when none was given.
+// Returns false when the template has no usable (non-empty) line.
+inline bool normalizeTemplate(WatermarkTemplate& tpl) {
+    std::vector<WatermarkConfig> kept;
+    kept.reserve(tpl.watermarks.size());
+    for (auto& wm : tpl.watermarks) {
+        const size_t b = wm.text.find_first_not_of(" \t\r\n");
+        if (b == std::string::npos) continue;
+        const size_t e = wm.text.find_last_not_of(" \t\r\n");
+        wm.text = wm.text.substr(b, e - b + 1);
+        kept.push_back(wm);
+    }
+    tpl.watermarks = std::move(kept);
+    if (tpl.watermarks.empty()) return false;
+
+    const size_t nb = tpl.name.find_first_not_of(" \t\r\n");
+    if (nb == std::string::npos) {
+        tpl.name = templateNameFromConfigs(tpl.watermarks);
+    } else {
+        const size_t ne = tpl.name.find_last_not_of(" \t\r\n");
+        tpl.name = tpl.name.substr(nb, ne - nb + 1);
+    }
+    return true;
+}
+
 // Expand a template into the per-file config list used by the batch pipeline.
 // Entries with empty text are dropped so a template never produces a blank
 // watermark.

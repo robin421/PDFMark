@@ -19,7 +19,7 @@ namespace pdfmark {
 // Per-document facts. 0 / defaults mean "unknown" and are handled conservatively.
 struct WorkloadFileInfo {
     int pages = 0;            // 0 => unknown, falls back to kAssumedPagesPerDoc
-    int watermarks = 1;       // watermark configs to generate for this file
+    int watermarks = 1;       // checked templates to generate for this file
     int64_t sourceBytes = 0;  // size of the source PDF on disk
     double widthPt = 595.0;   // page size used for the raster estimate (A4 default)
     double heightPt = 842.0;
@@ -41,8 +41,8 @@ enum class WorkloadRisk {
 
 struct WorkloadEstimate {
     int fileCount = 0;
-    int watermarkCount = 0;     // total output documents (subtasks)
-    int64_t estimatedPages = 0; // page rasterizations (= pages x watermarks)
+    int watermarkCount = 0;     // total output documents (= PDF x template pairs)
+    int64_t estimatedPages = 0; // page rasterizations (= pages x templates)
     int64_t pageImageBytes = 0; // largest single rasterized page at maxDpi
     int64_t maxDocSourceBytes = 0; // largest source PDF in the batch
     int64_t perDocPeakBytes = 0;// worst-case footprint of one concurrent document

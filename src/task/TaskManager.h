@@ -4,6 +4,7 @@
 #include "common/Common.h"
 #include "watermark/WatermarkConfig.h"
 #include "task/WorkloadEstimate.h"
+#include "watermark/WatermarkTemplate.h"
 #include <QObject>
 #include <QString>
 #include <QThread>
@@ -22,9 +23,12 @@ namespace pdfmark {
 class TaskManager : public QObject {
     Q_OBJECT
 public:
+    // One subtask == one (source PDF, template) pair == exactly one output PDF.
+    // A template's lines all share one style and are overlaid together, so a
+    // multi-line template still produces a single output document.
     struct FileSubtask {
         fs::path input;
-        WatermarkConfig config;
+        WatermarkTemplate tpl;
     };
 
     explicit TaskManager(QObject* parent = nullptr);
@@ -98,7 +102,7 @@ private:
     struct FileTaskItem {
         fs::path input;
         fs::path output;
-        WatermarkConfig config;
+        WatermarkTemplate tpl;
         int subtaskIndex = 0;
         QString displayName;
     };
