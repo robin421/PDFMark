@@ -20,6 +20,7 @@
 #include "pdf/PdfDocument.h"
 #include "pdf/PdfWriter.h"
 #include "task/TaskManager.h"
+#include "task/WorkerPool.h"
 #include "watermark/WatermarkConfig.h"
 #include "diagnostics/Diagnostics.h"
 
@@ -29,6 +30,7 @@
 #include <QPainter>
 #include <QTimer>
 
+#include <algorithm>
 #include <cassert>
 #include <filesystem>
 #include <iostream>
@@ -154,10 +156,17 @@ void testConcurrencyBudget() {
 
     // The bound must hold for a wider window too, and be independent of the
     // batch size: same 6 documents, window 4 => still never more than 4.
+    //
+    // NB: the pool can only provide `clamp(cores/2, 2, 4)` workers, so on a small
+    // CI runner (windows-2022 = 2 cores) a requested window of 4 is legitimately
+    // capped to 2. Assert the property that matters (never MORE than requested)
+    // plus the machine-dependent exact value.
+    const int workers = WorkerPool::idealWorkerCount(PerformanceMode::High);
     const RunOutcome wider = runBatch(workDir, inputs, 4, PerformanceMode::High);
     assert(wider.resultCount == kFiles);
     assert(wider.successCount == kFiles);
-    assert(wider.effective == 4);
+    assert(wider.effective == (std::min)(4, workers));
+    assert(wider.effective <= 4);
     assert(wider.peak <= 4);
 
     // Scale check: a much larger batch must still succeed and still respect
@@ -173,7 +182,8 @@ void testConcurrencyBudget() {
         const RunOutcome stress = runBatch(workDir, big, 3, PerformanceMode::High);
         assert(stress.resultCount == kBig);
         assert(stress.successCount == kBig);
-        assert(stress.effective == 3);
+        assert(stress.effective == (std::min)(3, workers));
+        assert(stress.effective <= 3);
         assert(stress.peak <= 3);
         std::cout << "  large batch (" << kBig << " docs, window 3): peak=" << stress.peak
                   << " success=" << stress.successCount << "\n";
