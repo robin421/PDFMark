@@ -280,6 +280,14 @@ void TaskManager::processDocumentBatch(const DocumentBatchJob& docJob,
         // document, so each page is encoded once per template.
         std::vector<WatermarkConfig> lines;
         std::vector<WatermarkRenderer::Stamp> stamps;
+        // Tile layout depends only on (image size, config, font), so it is
+        // computed once per template and reused for every page.
+        std::vector<std::vector<TileItem>> tilesPerLine;
+        int tilesForWidth = 0;   // page size the cached tiles were built for
+        int tilesForHeight = 0;
+        // Reused across pages so the per-page full-image copy becomes a blit
+        // into an already-allocated buffer (no per-page heap allocation).
+        QImage scratch;
         int dpi = 200;
         int jpegQuality = 85;
         double elapsedMs = 0.0;
@@ -355,27 +363,47 @@ void TaskManager::processDocumentBatch(const DocumentBatchJob& docJob,
             double heightPt = PdfDocument::getPageHeight(srcPage.get());
 
             // Single rasterization per page, shared by every template.
-            int baseDpi = contexts[0].dpi;
-            QImage baseImage = PdfRenderer::rasterizePage(srcPage.get(), baseDpi);
+            const int baseDpi = contexts[0].dpi;
+            const QImage baseImage = PdfRenderer::rasterizePage(srcPage.get(), baseDpi);
 
             for (size_t k = 0; k < contexts.size(); ++k) {
-                QImage pageImg;
-                if (contexts[k].dpi == baseDpi) {
-                    if (k == contexts.size() - 1) {
-                        pageImg = std::move(baseImage);
-                    } else {
-                        pageImg = baseImage.copy();
+                OutputContext& ctx = contexts[k];
+
+                if (ctx.dpi != baseDpi) {
+                    // Different DPI -> must rasterize separately (rare path).
+                    QImage pageImg = PdfRenderer::rasterizePage(srcPage.get(), ctx.dpi);
+                    for (size_t j = 0; j < ctx.lines.size(); ++j) {
+                        WatermarkRenderer::applyWatermark(pageImg, ctx.lines[j], ctx.stamps[j]);
                     }
-                } else {
-                    pageImg = PdfRenderer::rasterizePage(srcPage.get(), contexts[k].dpi);
+                    PdfWriter::appendRasterPage(ctx.dstDoc.get(), pageImg, widthPt, heightPt, ctx.jpegQuality);
+                    continue;
                 }
 
-                // Overlay every line of this template onto the same page, then
-                // encode that page exactly once.
-                for (size_t j = 0; j < contexts[k].lines.size(); ++j) {
-                    WatermarkRenderer::applyWatermark(pageImg, contexts[k].lines[j], contexts[k].stamps[j]);
+                // Tile geometry only depends on (page size, config, font), so
+                // recompute it only when the page size actually changes.
+                if (ctx.tilesForWidth != baseImage.width() ||
+                    ctx.tilesForHeight != baseImage.height()) {
+                    ctx.tilesForWidth = baseImage.width();
+                    ctx.tilesForHeight = baseImage.height();
+                    ctx.tilesPerLine.resize(ctx.lines.size());
+                    for (size_t j = 0; j < ctx.lines.size(); ++j) {
+                        ctx.tilesPerLine[j] = WatermarkTileLayout::calculateLayout(
+                            baseImage.width(), baseImage.height(),
+                            ctx.lines[j], ctx.stamps[j].font);
+                    }
                 }
-                PdfWriter::appendRasterPage(contexts[k].dstDoc.get(), pageImg, widthPt, heightPt, contexts[k].jpegQuality);
+
+                // Paint into the reusable scratch buffer: a blit of the freshly
+                // rasterized page, then one bitblt per watermark line. The
+                // previous code allocated a brand-new full-page QImage here for
+                // every page x template.
+                if (!WatermarkRenderer::fillBuffer(ctx.scratch, baseImage)) {
+                    throw PdfError("Failed to allocate watermark scratch buffer");
+                }
+                for (size_t j = 0; j < ctx.lines.size(); ++j) {
+                    WatermarkRenderer::blitTiles(ctx.scratch, ctx.stamps[j], ctx.tilesPerLine[j]);
+                }
+                PdfWriter::appendRasterPage(ctx.dstDoc.get(), ctx.scratch, widthPt, heightPt, ctx.jpegQuality);
             }
         } catch (const std::exception& e) {
             batchOk = false;

@@ -116,6 +116,33 @@ bool WatermarkRenderer::applyWatermark(QImage& image, const WatermarkConfig& con
     return true;
 }
 
+bool WatermarkRenderer::fillBuffer(QImage& scratch, const QImage& source) {
+    if (source.isNull()) return false;
+    if (scratch.size() != source.size() || scratch.format() != QImage::Format_RGB32) {
+        scratch = QImage(source.size(), QImage::Format_RGB32);
+        if (scratch.isNull()) return false;
+    }
+    QPainter blit(&scratch);
+    blit.drawImage(0, 0, source);
+    blit.end();
+    return true;
+}
+
+void WatermarkRenderer::blitTiles(QImage& target, const Stamp& stamp,
+                                  const std::vector<TileItem>& tiles) {
+    if (target.isNull() || !stamp.isValid() || tiles.empty()) return;
+    const double halfW = stamp.image.width() / 2.0;
+    const double halfH = stamp.image.height() / 2.0;
+
+    QPainter painter(&target);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+    for (const auto& tile : tiles) {
+        painter.drawImage(QPointF(tile.center.x() - halfW, tile.center.y() - halfH), stamp.image);
+    }
+    painter.end();
+}
+
 QImage WatermarkRenderer::renderPreview(int widthPx, int heightPx,
                                         const std::vector<WatermarkConfig>& configs) {
     const int canvasW = 800;

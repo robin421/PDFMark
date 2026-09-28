@@ -46,6 +46,13 @@ public:
     // Generates a self-deleting platform script (PowerShell/bat on Windows)
     bool applyUpdateAndRestart(const QString& zipFilePath);
 
+    // Builds the Windows batch script used to install the update. Exposed as a
+    // pure static function so the critical paths (absolute APP_DIR, taskkill,
+    // relaunch, recursive cleanup) are unit-testable without running cmd.exe.
+    //   appDir   : absolute path of the currently running app (unquoted, injected)
+    //   zipPath  : absolute path of the downloaded zip
+    static QString buildUpdateScript(const QString& appDir, const QString& zipPath);
+
 signals:
     void checkingStarted();
     void updateAvailable(const UpdateInfo& info);

@@ -2,9 +2,10 @@
 #pragma once
 
 #include "watermark/WatermarkConfig.h"
+#include "watermark/WatermarkTileLayout.h"
+#include <vector>
 #include <QImage>
 #include <QFont>
-#include <vector>
 
 namespace pdfmark {
 
@@ -29,6 +30,17 @@ public:
 
     // Paints repeating tiled watermark using an already-created Stamp.
     static bool applyWatermark(QImage& image, const WatermarkConfig& config, const Stamp& stamp);
+
+    // Fill a caller-owned buffer from a freshly rasterized page. The buffer is
+    // (re)allocated only when its size/format changes, so reusing one scratch
+    // buffer across pages avoids a full-page heap allocation per page.
+    static bool fillBuffer(QImage& scratch, const QImage& source);
+
+    // Blit an already-rendered, pre-rotated stamp at every tile position.
+    // Tiles only depend on (image size, config, font), so callers may compute
+    // them once and reuse them across every page.
+    static void blitTiles(QImage& target, const Stamp& stamp,
+                          const std::vector<TileItem>& tiles);
 
     // Generates a preview image of specified dimensions (e.g. A4 aspect ratio)
     // with a simulated white document background and the configured watermark.

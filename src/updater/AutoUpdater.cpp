@@ -129,55 +129,109 @@ void AutoUpdater::cancelDownload() {
     QFile::remove(downloadDestPath_);
 }
 
-bool AutoUpdater::applyUpdateAndRestart(const QString& zipFilePath) {
-    // Create the batch script in the same directory as the zip file
-    QString scriptDir = QFileInfo(zipFilePath).absolutePath();
-    QString scriptPath = scriptDir + "/pdfmark_update.bat";
-
-    // Get the current application directory
-    QString appDir = QCoreApplication::applicationDirPath();
-
-    // Build the batch script content
-    QString scriptContent = QStringLiteral(
+QString AutoUpdater::buildUpdateScript(const QString& appDir, const QString& zipPath) {
+    // The previous version used a hard-coded RELATIVE path (`xcopy . ..\..` and
+    // `start ..\PdfMark.exe`). That relative path is resolved against %TEMP%,
+    // NOT against the app folder, so the update was installed into the wrong
+    // place and then tried to launch a non-existent exe -- silently, because
+    // all output was redirected to nul. Everything now uses the real absolute
+    // application directory.
+    //
+    // NOTE: placeholders are substituted with QString::replace (never arg()),
+    // because arg() would mangle the %%i batch loop variable.
+    QString script = QStringLiteral(
         "@echo off\n"
-        "setlocal enabledelayedexpansion\n"
-        "set ZIP_PATH=%~dp0PDFMark-Windows-x64.zip\n"
-        "set TEMP_DIR=%TEMP%\\PDFMarkUpdate\n"
-        "mkdir \"%TEMP_DIR%\" 2>nul\n"
+        "chcp 65001 >nul\n"
+        "setlocal\n"
+        "set \"APP_DIR=%APPDIR%\"\n"
+        "set \"ZIP_PATH=%ZIPPATH%\"\n"
+        "set \"TEMP_DIR=%TEMP%\\PDFMarkUpdate\"\n"
+        "if not exist \"%TEMP_DIR%\" mkdir \"%TEMP_DIR%\"\n"
         "cd /d \"%TEMP_DIR%\"\n"
-        "echo 等待当前进程退出...\n"
-        "timeout /t 5\n"
-        "echo 解压 %ZIP_PATH%...\n"
-        "powershell -Command \"Expand-Archive -Path '%ZIP_PATH%' -DestinationPath '.' -Force\"\n"
-        "echo 覆盖文件...\n"
-        "xcopy /E /Q /Y . ..\\.. >nul\n"
-        "echo 启动新版本...\n"
-        "start \"\" ..\\PdfMark.exe\n"
-        "echo 更新完成。\n"
-        "del /Q \"%TEMP_DIR%\\*.*\"\n"
-        "rmdir \"%TEMP_DIR%\"\n"
-        "del /Q \"%~f0\"\n"
-    );
+        "\n"
+        "echo [1/5] 等待 PDFMark 退出...\n"
+        "taskkill /IM PdfMark.exe /F >nul 2>nul\n"
+        "for /L %%i in (1,1,20) do (\n"
+        "    tasklist /FI \"IMAGENAME eq PdfMark.exe\" 2>nul | find /I \"PdfMark.exe\" >nul\n"
+        "    if errorlevel 1 goto :killed\n"
+        "    timeout /t 1 /nobreak >nul\n"
+        ")\n"
+        ":killed\n"
+        "\n"
+        "echo [2/5] 解压更新包...\n"
+        "powershell -NoProfile -ExecutionPolicy Bypass -Command \"Expand-Archive -LiteralPath '%ZIPPATH%' -DestinationPath '.' -Force\"\n"
+        "if errorlevel 1 goto :failed\n"
+        "if not exist \"%APP_DIR%\\PdfMark.exe\" goto :failed\n"
+        "\n"
+        "echo [3/5] 写入 %APPDIR% ...\n"
+        "xcopy /E /Y /I /Q \".\" \"%APP_DIR%\\\" >nul\n"
+        "if errorlevel 1 goto :readonly\n"
+        "\n"
+        "echo [4/5] 启动新版本...\n"
+        "start \"\" \"%APP_DIR%\\PdfMark.exe\"\n"
+        "echo [5/5] 更新完成。\n"
+        "cd /d \"%TEMP%\"\n"
+        "rd /S /Q \"%TEMP_DIR%\" >nul 2>nul\n"
+        "del /Q \"%~f0\" >nul 2>nul\n"
+        "exit /b 0\n"
+        "\n"
+        ":readonly\n"
+        "echo.\n"
+        "echo [失败] 没有权限写入程序目录：\n"
+        "echo         %APPDIR%\n"
+        "echo 请把 PDFMark 放在有写入权限的目录（例如 D:\\PDFMark），\n"
+        "echo 或以管理员身份运行本程序后重新检查更新。\n"
+        "goto :cleanup\n"
+        "\n"
+        ":failed\n"
+        "echo.\n"
+        "echo [失败] 更新包解压失败或内容不完整，本次未做任何修改。\n"
+        "\n"
+        ":cleanup\n"
+        "cd /d \"%TEMP%\"\n"
+        "rd /S /Q \"%TEMP_DIR%\" >nul 2>nul\n"
+        "del /Q \"%~f0\" >nul 2>nul\n"
+        "echo.\n"
+        "pause\n"
+        "exit /b 1\n");
+
+    script.replace("%APPDIR%", QDir::toNativeSeparators(appDir));
+    script.replace("%ZIPPATH%", QDir::toNativeSeparators(zipPath));
+    return script;
+}
+
+bool AutoUpdater::applyUpdateAndRestart(const QString& zipFilePath) {
+    // Place the helper script next to the downloaded zip so both live in temp.
+    const QString scriptDir = QFileInfo(zipFilePath).absolutePath();
+    const QString scriptPath = scriptDir + "/pdfmark_update.bat";
+
+    // This is the folder the running exe lives in - the update is installed
+    // there (portable, no installer, no admin rights required).
+    const QString appDir = QCoreApplication::applicationDirPath();
+    if (appDir.isEmpty()) {
+        qWarning() << "Cannot resolve application directory for update";
+        return false;
+    }
+
+    const QString scriptContent = buildUpdateScript(appDir, zipFilePath);
 
     QFile scriptFile(scriptPath);
     if (!scriptFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
         qWarning() << "Cannot create update script:" << scriptPath;
         return false;
     }
+    // Write as UTF-8 with BOM-free plain text; chcp 65001 inside handles display.
     scriptFile.write(scriptContent.toUtf8());
     scriptFile.close();
 
-    // Make sure the script is executable? Not needed on Windows .bat
-
-    // Launch the batch script in detached mode
-    bool started = QProcess::startDetached(scriptPath, QStringList());
+    // Launch detached so it survives our own exit.
+    const bool started = QProcess::startDetached(scriptPath, QStringList());
     if (!started) {
         qWarning() << "Failed to start update script:" << scriptPath;
         return false;
     }
 
-    // The batch script will wait for the current process to exit, then update and restart.
-    // We should exit the current instance to allow the batch script to proceed.
+    // The script taskkills us and relaunches; quit so it can proceed.
     QCoreApplication::quit();
     return true;
 }

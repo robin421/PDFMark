@@ -62,6 +62,35 @@ private slots:
         QVERIFY(!info.downloadUrl.isEmpty());
         QVERIFY(info.assetSize > 0);
     }
+
+    // Regression guard for the broken auto-update installer.
+    //
+    // The old script used relative paths (`xcopy . ..\..`, `start ..\PdfMark.exe`)
+    // that resolve against %TEMP% and not the app folder, so the update was
+    // written to the wrong place and a non-existent exe was launched, all
+    // silently. These assertions pin the fixed, absolute-path behaviour.
+    void testUpdateScriptTargetsAppDir() {
+        const QString appDir = QStringLiteral("D:\\Tools\\PDFMark");
+        const QString zip = QStringLiteral("C:\\Users\\bob\\AppData\\Local\\Temp\\PDFMark-Windows-x64.zip");
+        const QString script = pdfmark::AutoUpdater::buildUpdateScript(appDir, zip);
+
+        // The real app directory is injected and used for install + relaunch.
+        QVERIFY(script.contains("set \"APP_DIR=D:\\Tools\\PDFMark\""));
+        QVERIFY(script.contains("\"%APP_DIR%\\PdfMark.exe\""));
+        QVERIFY(script.contains("xcopy"));
+        // Must NOT use the old broken relative paths.
+        QVERIFY(!script.contains("..\\.."));
+        QVERIFY(!script.contains("start \"\" ..\\PdfMark.exe"));
+        // Zip path is injected and quoted.
+        QVERIFY(script.contains("C:\\Users\\bob\\AppData\\Local\\Temp\\PDFMark-Windows-x64.zip"));
+        // Robustness essentials.
+        QVERIFY(script.contains("taskkill /IM PdfMark.exe"));  // free the running exe
+        QVERIFY(script.contains("rd /S /Q"));                  // recursive temp cleanup
+        QVERIFY(script.contains("if errorlevel 1 goto :readonly")); // writable-dir failure path
+        QVERIFY(script.contains("pause"));                    // surface failures to the user
+        // Loop variable must survive verbatim (no arg() mangling).
+        QVERIFY(script.contains("for /L %%i in (1,1,20) do ("));
+    }
 };
 
 QTEST_MAIN(AutoUpdaterTest)
