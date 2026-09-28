@@ -143,6 +143,15 @@ void testMultiWatermarkBatch() {
     std::cout << "[STEP 6] Results count=" << results.size() << std::endl;
     assert(results.size() == configs.size());
     for (const auto& r : results) {
+        if (!r.success) {
+            std::printf("  [FAIL] %s -> %s : %s\n",
+                        pathToString(r.outputPath).c_str(), pathToString(r.inputPath).c_str(),
+                        r.errorMessage.c_str());
+            for (const auto& e : fs::recursive_directory_iterator(workDir, ec)) {
+                std::printf("  [DIAG] %s%s\n", e.is_directory() ? "[d] " : "    ",
+                            pathToString(e.path()).c_str());
+            }
+        }
         assert(r.success);
         assert(r.totalPages == 1);
         assert(!r.watermarkText.empty());

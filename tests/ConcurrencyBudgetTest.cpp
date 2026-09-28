@@ -99,7 +99,12 @@ RunOutcome runBatch(const fs::path& workDir,
         outcome.effective = tm.effectiveConcurrency();
         outcome.resultCount = static_cast<int>(results.size());
         for (const auto& r : results) {
-            if (r.success) outcome.successCount++;
+            if (r.success) {
+                outcome.successCount++;
+            } else {
+                std::cout << "  [FAIL] " << pathToString(r.outputPath) << " <- "
+                          << pathToString(r.inputPath) << " : " << r.errorMessage << "\n";
+            }
         }
         outcome.finished = true;
         loop.quit();

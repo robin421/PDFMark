@@ -135,6 +135,19 @@ void expectAllSucceeded(const std::vector<FileResult>& results) {
     }
 }
 
+// Prints everything under `root` (path strings come from production helpers, so
+// this stays readable even when a test-built path is wrong for the platform).
+void dumpTree(const fs::path& root) {
+    std::error_code ec;
+    std::printf("  [DIAG] tree of %s (dir=%d):\n", pathToString(root).c_str(),
+                static_cast<int>(fs::is_directory(root, ec)));
+    if (!fs::is_directory(root, ec)) return;
+    for (const auto& e : fs::recursive_directory_iterator(root, ec)) {
+        std::printf("         %s%s\n", e.is_directory() ? "[d] " : "    ",
+                    pathToString(e.path()).c_str());
+    }
+}
+
 } // namespace
 
 void testOutputNaming() {
@@ -170,7 +183,8 @@ void testOutputNaming() {
         assert(names.count("sample_input_红色.pdf") == 1);
         assert(names.count("sample_input_蓝色.pdf") == 1);
 
-        const std::set<std::string> onDisk = filesIn(outDir / "机密");
+        const std::set<std::string> onDisk = filesIn(outDir / stringToPath("机密"));
+        if (onDisk.size() != 2) dumpTree(outDir);
         assert(onDisk.size() == 2);
         assert(onDisk.count("sample_input_红色.pdf") == 1);
         assert(onDisk.count("sample_input_蓝色.pdf") == 1);
@@ -217,7 +231,7 @@ void testOutputNaming() {
 
         assert(parentNamesOf(got).size() == 1);
         assert(parentNamesOf(got).count("机密") == 1);
-        const std::set<std::string> onDisk = filesIn(outDir / "机密");
+        const std::set<std::string> onDisk = filesIn(outDir / stringToPath("机密"));
         assert(onDisk.size() == 2);
         assert(onDisk.count("sample_input.pdf") == 1);        // untouched first style
         assert(onDisk.count("sample_input_红色.pdf") == 1);   // variant suffix
@@ -237,7 +251,7 @@ void testOutputNaming() {
         assert(parentNamesOf(got).size() == 1);
         assert(parentNamesOf(got).count("机密") == 1);
 
-        const std::set<std::string> onDisk = filesIn(outDir / "机密");
+        const std::set<std::string> onDisk = filesIn(outDir / stringToPath("机密"));
         assert(onDisk.size() == 2);                            // collision resolved
         assert(onDisk.count("sample_input.pdf") == 1);
         // The counter has always started at 1 ("_1", not "_2"); the README used to
@@ -259,7 +273,7 @@ void testOutputNaming() {
         expectAllSucceeded(got);
         assert(parentNamesOf(got).size() == 1);
         assert(parentNamesOf(got).count("对外") == 1);
-        assert(filesIn(outDir / "对外").size() == 2);
+        assert(filesIn(outDir / stringToPath("对外")).size() == 2);
     }
 
     // ── Same variant suffix twice: counter is appended after the suffix ────
@@ -274,7 +288,7 @@ void testOutputNaming() {
         expectAllSucceeded(got);
         assert(parentNamesOf(got).size() == 1);
 
-        const std::set<std::string> onDisk = filesIn(outDir / "机密");
+        const std::set<std::string> onDisk = filesIn(outDir / stringToPath("机密"));
         assert(onDisk.size() == 2);
         assert(onDisk.count("sample_input_红色.pdf") == 1);
         assert(onDisk.count("sample_input_红色_1.pdf") == 1);
