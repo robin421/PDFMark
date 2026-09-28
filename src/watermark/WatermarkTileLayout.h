@@ -18,10 +18,13 @@ struct TileItem {
 
 class WatermarkTileLayout {
 public:
-    // Calculates the list of tile items that completely covers the given target
-    // rectangle [0, widthPx] x [0, heightPx] with staggered diagonal repeating text.
+    // Calculates the list of tile items that covers the given target rectangle
+    // [0, widthPx] x [0, heightPx] with staggered diagonal repeating text.
     //
-    // Guaranteed to leave no corners unwatermarked by padding bounding tiles.
+    // Guarantees that no page border is left with a blank band: the grid is
+    // anchored on the page's bounding box in the rotated frame and its last
+    // row/column is clamped onto the far border, so the deliberate gaps between
+    // tiles can never fall on a page edge.
     static std::vector<TileItem> calculateLayout(int widthPx,
                                                  int heightPx,
                                                  const WatermarkConfig& config,
