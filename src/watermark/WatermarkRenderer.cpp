@@ -12,7 +12,7 @@
 
 namespace pdfmark {
 
-WatermarkRenderer::Stamp WatermarkRenderer::createStamp(const WatermarkConfig& config) {
+WatermarkRenderer::Stamp WatermarkRenderer::createStamp(const WatermarkConfig& config, int maxTextWidthPx) {
     Stamp stamp;
     if (!config.isValid()) {
         return stamp;
@@ -72,6 +72,31 @@ WatermarkRenderer::Stamp WatermarkRenderer::createStamp(const WatermarkConfig& c
         fp.end();
     }
 
+    // ── Bound the raster before rotating it ────────────────────────────────
+    // QImage::transformed() allocates the ROTATED BOUNDING BOX, whose area grows
+    // with the square of the text length, and every tile of every page then
+    // blits that image. A tile can never display more text than the page's
+    // rotated width — only the text inside that window can reach the page (see
+    // WatermarkTileLayout::rotatedExtentU) — so the flat text is cropped to that
+    // width first.
+    //
+    // The crop is centred on the text centre, and its width is kept on the same
+    // pixel parity as the source, so the removed margin is EXACTLY symmetric
+    // (an odd difference would truncate the left inset by half a pixel and shift
+    // the rotated stamp by that much). The rotated image therefore stays centred
+    // on the text centre and the per-tile blit alignment is untouched.
+    //
+    // Only the two layouts that cannot fit the text in one page-wide row (single
+    // centred tile, or a touching pair) are ever cropped, and both keep the whole
+    // window that is visible on the page, so ordinary watermarks render exactly
+    // as before.
+    if (maxTextWidthPx > 0 && flat.width() > maxTextWidthPx) {
+        int cropW = maxTextWidthPx;
+        if (((flat.width() - cropW) & 1) != 0) --cropW;
+        const int x = (flat.width() - cropW) / 2;
+        flat = flat.copy(x, 0, cropW, flat.height());
+    }
+
     if (std::abs(config.rotationDegrees) < 1e-9) {
         stamp.image = std::move(flat);
     } else {
@@ -89,7 +114,13 @@ bool WatermarkRenderer::applyWatermark(QImage& image, const WatermarkConfig& con
     if (image.isNull() || !config.isValid()) {
         return false;
     }
-    Stamp stamp = createStamp(config);
+    // Bound the rotated stamp to what this page can actually show (see
+    // createStamp): any longer text never becomes visible on this page, it only
+    // inflates the rotated raster.
+    const int maxTextWidth = static_cast<int>(std::ceil(
+        WatermarkTileLayout::rotatedExtentU(image.width(), image.height(),
+                                            config.rotationDegrees))) + 2;
+    Stamp stamp = createStamp(config, maxTextWidth);
     return applyWatermark(image, config, stamp);
 }
 

@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <unordered_set>
 #include <memory>
 #include <condition_variable>
@@ -294,11 +295,14 @@ void TaskManager::processDocumentBatch(const DocumentBatchJob& docJob,
         // All lines of the template share one style and go onto the SAME output
         // document, so each page is encoded once per template.
         std::vector<WatermarkConfig> lines;
+        // Stamps AND tile layout both depend on the page raster size now: the
+        // stamp is cropped to the page's rotated width so a very long watermark
+        // cannot rotate into a huge raster (see WatermarkRenderer::createStamp).
+        // They are therefore rebuilt together, once per page size, and reused for
+        // every page of that size.
         std::vector<WatermarkRenderer::Stamp> stamps;
-        // Tile layout depends only on (image size, config, font), so it is
-        // computed once per template and reused for every page.
         std::vector<std::vector<TileItem>> tilesPerLine;
-        int tilesForWidth = 0;   // page size the cached tiles were built for
+        int tilesForWidth = 0;   // page size the cached stamps/tiles were built for
         int tilesForHeight = 0;
         // Reused across pages so the per-page full-image copy becomes a blit
         // into an already-allocated buffer (no per-page heap allocation).
@@ -307,6 +311,28 @@ void TaskManager::processDocumentBatch(const DocumentBatchJob& docJob,
         int jpegQuality = 85;
         double elapsedMs = 0.0;
         std::unique_ptr<ScopedTimer> timer;
+
+        // (Re)build the per-page-size geometry: one stamp and one tile list per
+        // watermark line. Called for every page, but only does work when the
+        // raster size actually changed.
+        void ensurePageGeometry(int widthPx, int heightPx) {
+            if (tilesForWidth == widthPx && tilesForHeight == heightPx) return;
+            tilesForWidth = widthPx;
+            tilesForHeight = heightPx;
+            stamps.assign(lines.size(), WatermarkRenderer::Stamp{});
+            tilesPerLine.assign(lines.size(), std::vector<TileItem>{});
+            for (size_t j = 0; j < lines.size(); ++j) {
+                // Only the text inside the page's rotated width can reach this
+                // page, so the stamp is cropped to it (+2 px so the cut glyph
+                // still crosses the border instead of stopping a pixel short).
+                const int crop = static_cast<int>(std::ceil(
+                    WatermarkTileLayout::rotatedExtentU(widthPx, heightPx,
+                                                        lines[j].rotationDegrees))) + 2;
+                stamps[j] = WatermarkRenderer::createStamp(lines[j], crop);
+                tilesPerLine[j] = WatermarkTileLayout::calculateLayout(
+                    widthPx, heightPx, lines[j], stamps[j].font);
+            }
+        }
     };
 
     std::vector<OutputContext> contexts(docJob.tasks.size());
@@ -326,10 +352,6 @@ void TaskManager::processDocumentBatch(const DocumentBatchJob& docJob,
         }
         contexts[k].dpi = contexts[k].lines.front().dpi;
         contexts[k].jpegQuality = contexts[k].lines.front().jpegQuality;
-        contexts[k].stamps.reserve(contexts[k].lines.size());
-        for (const auto& line : contexts[k].lines) {
-            contexts[k].stamps.push_back(WatermarkRenderer::createStamp(line));
-        }
 
         std::error_code ecMkdir;
         fs::create_directories(docJob.tasks[k].output.parent_path(), ecMkdir);
@@ -387,26 +409,17 @@ void TaskManager::processDocumentBatch(const DocumentBatchJob& docJob,
                 if (ctx.dpi != baseDpi) {
                     // Different DPI -> must rasterize separately (rare path).
                     QImage pageImg = PdfRenderer::rasterizePage(srcPage.get(), ctx.dpi);
+                    ctx.ensurePageGeometry(pageImg.width(), pageImg.height());
                     for (size_t j = 0; j < ctx.lines.size(); ++j) {
-                        WatermarkRenderer::applyWatermark(pageImg, ctx.lines[j], ctx.stamps[j]);
+                        WatermarkRenderer::blitTiles(pageImg, ctx.stamps[j], ctx.tilesPerLine[j]);
                     }
                     PdfWriter::appendRasterPage(ctx.dstDoc.get(), pageImg, widthPt, heightPt, ctx.jpegQuality);
                     continue;
                 }
 
-                // Tile geometry only depends on (page size, config, font), so
-                // recompute it only when the page size actually changes.
-                if (ctx.tilesForWidth != baseImage.width() ||
-                    ctx.tilesForHeight != baseImage.height()) {
-                    ctx.tilesForWidth = baseImage.width();
-                    ctx.tilesForHeight = baseImage.height();
-                    ctx.tilesPerLine.resize(ctx.lines.size());
-                    for (size_t j = 0; j < ctx.lines.size(); ++j) {
-                        ctx.tilesPerLine[j] = WatermarkTileLayout::calculateLayout(
-                            baseImage.width(), baseImage.height(),
-                            ctx.lines[j], ctx.stamps[j].font);
-                    }
-                }
+                // Stamps and tile geometry depend on the page size, so they are
+                // rebuilt only when it actually changes.
+                ctx.ensurePageGeometry(baseImage.width(), baseImage.height());
 
                 // Paint into the reusable scratch buffer: a blit of the freshly
                 // rasterized page, then one bitblt per watermark line. The

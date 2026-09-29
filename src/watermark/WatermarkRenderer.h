@@ -22,7 +22,19 @@ public:
     };
 
     // Pre-renders a single tile stamp for the specified configuration.
-    static Stamp createStamp(const WatermarkConfig& config);
+    //
+    // `maxTextWidthPx` bounds the raster: a tile can never show more than the
+    // page's rotated width (see WatermarkTileLayout::rotatedExtentU), so the
+    // flat text is cropped SYMMETRICALLY to that width (same pixel parity) before
+    // it is rotated and the tile's alignment is preserved. Only the layouts that
+    // cannot fit the text in one page-wide row are actually cropped; for shorter
+    // texts the crop width already exceeds the text width, i.e. it is a no-op.
+    // Without the bound a 200-character watermark at 200 DPI rotates a
+    // ~13200 x 102 px strip into a ~10800 x 7600 px (~330 MB) image, and every
+    // tile of every page then blits that image.
+    // 0 keeps the historical behaviour (no crop) and is meant for tests that
+    // want the full stamp.
+    static Stamp createStamp(const WatermarkConfig& config, int maxTextWidthPx = 0);
 
     // Paints repeating tiled watermark directly onto the provided QImage.
     // Generates a temporary Stamp internally.
