@@ -296,21 +296,49 @@ void testOutputNaming() {
     }
 
     // ── Windows: a folder name ending in dots is unusable ────────────────
-    // Derived template names of watermark texts longer than 6 characters always
-    // end with "..." (e.g. "内部文件-李..."). Win32 strips those dots when
-    // CREATING the directory but not when the same name is reused as a path
-    // prefix ("...\内部文件-李...\~x.tmp" -> ENOENT), so on Windows every such
-    // output failed with "Failed to open output file". Regression guard.
+    // Win32 strips trailing dots when CREATING a directory but not when the same
+    // name is reused as a path prefix ("...\内部文件-李...\~x.tmp" -> ENOENT), so
+    // such a template used to fail with "Failed to open output file" on Windows.
+    // (Derived names are no longer truncated to 6 chars + "...", but a user can
+    // still type a name like that.) Regression guard.
     {
         const fs::path outDir = workDir / "out_trailing_dots";
         WatermarkTemplate tpl = makeTemplate("内部文件-李...", "内部文件-李四", "", "");
-        assert(templateNameFromConfigs(tpl.watermarks) == "内部文件-李...");   // what the UI derives
+        assert(templateNameFromConfigs(tpl.watermarks) == "内部文件-李四");   // full text now
 
         const auto got = runBatch(inputPdf, {tpl}, outDir);
         assert(got.size() == 1);
         expectAllSucceeded(got);
         assert(pathToString(got[0].outputPath.parent_path().filename()) == "内部文件-李");
         assert(filesIn(outDir / stringToPath("内部文件-李")).count("sample_input.pdf") == 1);
+    }
+
+    // ── A long template name is bounded, but stays unique ────────────────
+    // The name is no longer capped, yet a path component cannot be arbitrarily
+    // long: the folder is cut to kMaxPathComponentBytes and tagged with a hash of
+    // the full name, so two long names sharing a prefix still differ.
+    {
+        const fs::path outDir = workDir / "out_long_name";
+        const std::string prefix = "本文件仅供内部使用未经许可不得外传";
+        std::string longA = prefix;
+        std::string longB = prefix;
+        for (int i = 0; i < 60; ++i) { longA += "甲"; longB += "乙"; }
+        assert(longA.size() > kMaxPathComponentBytes);
+        assert(templateNameFromConfigs({makeTemplate("x", longA, "", "").watermarks[0]}) == longA);
+
+        WatermarkTemplate a = makeTemplate(longA, longA, "甲", "");
+        WatermarkTemplate b = makeTemplate(longB, longB, "乙", "");
+        const auto got = runBatch(inputPdf, {a, b}, outDir);
+        assert(got.size() == 2);
+        expectAllSucceeded(got);
+
+        const auto folders = parentNamesOf(got);
+        assert(folders.size() == 2);                       // hash keeps them apart
+        for (const auto& f : folders) {
+            assert(f.size() <= kMaxPathComponentBytes);
+            assert(f.compare(0, 12, prefix.substr(0, 12)) == 0);   // readable prefix kept
+            assert(filesIn(outDir / stringToPath(f)).size() == 1);
+        }
     }
 
     // ── Regression: no outputFolder => folder == template name (1.4.0 rule) ─

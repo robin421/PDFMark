@@ -192,6 +192,11 @@ void MainWindow::setupUi() {
     templateList_->setSelectionMode(QAbstractItemView::SingleSelection);
     templateList_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     templateList_->setAlternatingRowColors(true);
+    // Template names are no longer capped, so a long one must not force a
+    // horizontal scrollbar: elide the shown text (the full name stays in the item
+    // data and in the tooltip).
+    templateList_->setTextElideMode(Qt::ElideRight);
+    templateList_->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     templateList_->setToolTip("勾选的模板参与生成；选中某项后可用下方按钮编辑/删除/预览");
     tplLayout->addWidget(templateList_, 1);
 

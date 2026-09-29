@@ -341,17 +341,29 @@ void testWatermarkTemplate() {
         one.assign(1, a);
         assert(templateNameFromConfigs(one) == "机密");
 
-        a.text = "一二三四五六";          // exactly 6 -> unchanged
+        a.text = "一二三四五六";
         one.assign(1, a);
         assert(templateNameFromConfigs(one) == "一二三四五六");
 
-        a.text = "机密文件请勿外传";      // 8 chars -> first 6 + "..."
+        // No length limit: the whole first line becomes the name (it used to be
+        // truncated to 6 characters + "...").
+        a.text = "机密文件请勿外传";
         one.assign(1, a);
-        assert(templateNameFromConfigs(one) == "机密文件请勿...");
+        assert(templateNameFromConfigs(one) == "机密文件请勿外传");
 
-        a.text = "ABCDEFGH";              // 8 ASCII -> first 6 + "..."
+        a.text = "ABCDEFGH";
         one.assign(1, a);
-        assert(templateNameFromConfigs(one) == "ABCDEF...");
+        assert(templateNameFromConfigs(one) == "ABCDEFGH");
+
+        a.text = "本文件仅供内部使用，未经许可不得外传（含附件与附表）";
+        one.assign(1, a);
+        assert(templateNameFromConfigs(one) == "本文件仅供内部使用，未经许可不得外传（含附件与附表）");
+        assert(templateNameFromConfigs(one).size() > 6 * 3);   // UTF-8 bytes
+
+        // Only the first LINE is used, even if a row somehow contains newlines.
+        a.text = "第一行名称\n第二行";
+        one.assign(1, a);
+        assert(templateNameFromConfigs(one) == "第一行名称");
 
         a.text = "  机密  ";              // trimmed
         one.assign(1, a);

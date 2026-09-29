@@ -3,8 +3,10 @@
 // Common.h - Shared by all modules to avoid circular dependencies.
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -119,6 +121,36 @@ inline std::string sanitizeFilenameOrEmpty(const std::string& raw) {
 inline std::string sanitizeFilename(const std::string& raw) {
     std::string clean = sanitizeFilenameOrEmpty(raw);
     return clean.empty() ? std::string("watermark") : clean;
+}
+
+// Longest path component we hand to the filesystem, in UTF-8 bytes. APFS/ext4
+// refuse a component beyond 255 bytes, and Windows caps the whole path at 260
+// characters unless long paths are enabled. 200 leaves room for the
+// "~<name>.<id>.tmp" staging file the writer creates next to the output.
+inline constexpr size_t kMaxPathComponentBytes = 200;
+
+// Bounds a path component WITHOUT losing the ability to tell inputs apart: the
+// tail is replaced by "_<hash>", where the hash covers the whole original value,
+// so two long names that differ only at the end still map to two different
+// folders/files. Inputs that already fit are returned unchanged, and the cut is
+// made on a UTF-8 boundary so the result never holds half a character.
+inline std::string boundPathComponent(const std::string& part,
+                                      size_t maxBytes = kMaxPathComponentBytes) {
+    if (maxBytes == 0 || part.size() <= maxBytes) return part;
+
+    uint32_t hash = 2166136261u;   // FNV-1a over the FULL value
+    for (const unsigned char c : part) {
+        hash ^= c;
+        hash *= 16777619u;
+    }
+    char hex[9];
+    std::snprintf(hex, sizeof(hex), "%08x", hash);
+    const std::string suffix = std::string("_") + hex;
+
+    const size_t budget = maxBytes > suffix.size() ? maxBytes - suffix.size() : 0;
+    size_t cut = std::min(budget, part.size());
+    while (cut > 0 && (static_cast<unsigned char>(part[cut]) & 0xC0) == 0x80) --cut;
+    return part.substr(0, cut) + suffix;
 }
 
 // Generic PDF error with human-readable detail.

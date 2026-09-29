@@ -219,8 +219,9 @@ fs::path TaskManager::outputPathFor(const fs::path& input,
                                    const std::string& folder,
                                    const std::string& variantSuffix,
                                    int duplicateIndex) const {
-    // 子目录 = 模板的有效文件夹名（outputFolder，未设置时为模板名）
-    const std::string subdir = sanitizeFilename(folder);
+    // 子目录 = 模板的有效文件夹名（outputFolder，未设置时为模板名）。
+    // 模板名不再限长，因此这里必须把路径片段收敛到文件系统能接受的长度。
+    const std::string subdir = boundPathComponent(sanitizeFilename(folder));
 
     // 文件名 = 源 PDF 的原文件名（stem+ext），可选拼上「变体后缀」，
     // 让同一文件夹内「文字相同、样式不同」的输出彼此可区分：报告_红色.pdf
@@ -228,16 +229,21 @@ fs::path TaskManager::outputPathFor(const fs::path& input,
     const std::string ext = pathToString(input.extension());
     const std::string suffix = sanitizeFilenameOrEmpty(variantSuffix);
 
-    std::string filename = pathToString(input.filename());
+    std::string namePart = stem;
     if (!suffix.empty()) {
-        filename = stem + "_" + suffix + ext;
+        namePart += "_" + suffix;
     }
     if (duplicateIndex > 0) {
         // 后缀留空或后缀也相同导致仍然重名时，退化为 _1 / _2 序号
-        const std::string tag = suffix.empty() ? ("_" + std::to_string(duplicateIndex))
-                                               : ("_" + suffix + "_" + std::to_string(duplicateIndex));
-        filename = stem + tag + ext;
+        namePart += "_" + std::to_string(duplicateIndex);
     }
+    // 按「不含扩展名」的总长收敛：源文件名本身很长时才可能触发，
+    // 这样连同扩展名与临时文件后缀都不会超出文件系统的单段上限。
+    const size_t nameBudget = kMaxPathComponentBytes > ext.size()
+        ? kMaxPathComponentBytes - ext.size()
+        : 0;
+    const std::string filename = boundPathComponent(namePart, nameBudget) + ext;
+
     if (!outputDir_.empty()) {
         return outputDir_ / stringToPath(subdir) / stringToPath(filename);
     }

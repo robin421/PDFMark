@@ -92,11 +92,12 @@ void TemplateEditDialog::buildUi(bool creating) {
     nameEdit_ = new QLineEdit(this);
     // Object names make the dialog drivable from tests / UI automation.
     nameEdit_->setObjectName(QStringLiteral("templateNameEdit"));
-    nameEdit_->setPlaceholderText(QStringLiteral("留空则自动使用水印文字（超出 6 字截断）"));
+    nameEdit_->setPlaceholderText(QStringLiteral("留空则自动使用水印文字首行（不限长度）"));
     nameEdit_->setToolTip(QStringLiteral(
         "模板在列表里的名字。默认也作为输出子目录名，"
         "除非在下方指定了「输出文件夹」。\n"
-        "与已有模板重名时会自动变成「名字 (2)」，不会覆盖。"));
+        "与已有模板重名时会自动变成「名字 (2)」，不会覆盖。\n"
+        "名字不限长度；作为目录名过长时会被截断并以 _哈希 结尾"));
     nameRow->addWidget(nameEdit_, 1);
     left->addLayout(nameRow);
 
@@ -414,8 +415,18 @@ void TemplateEditDialog::refreshOutputHint() {
     const QString effective = folder.isEmpty() ? finalName : folder;
     const QString suffix = variantEdit_->text().trimmed();
 
+    // Show the folder name that will really be created: a long name is bounded to
+    // what the filesystem accepts (see boundPathComponent).
+    const std::string bounded =
+        boundPathComponent(effective.toUtf8().toStdString());
+    const QString shown =
+        (bounded == effective.toUtf8().toStdString())
+            ? effective
+            : QStringLiteral("%1（过长，目录名会截断为 %2）")
+                  .arg(effective, QString::fromUtf8(bounded.c_str()));
+
     QString hint = QStringLiteral("输出到「%1/」，文件名后缀 %2")
-        .arg(effective, suffix.isEmpty() ? QStringLiteral("（无）") : QString("_%1").arg(suffix));
+        .arg(shown, suffix.isEmpty() ? QStringLiteral("（无）") : QString("_%1").arg(suffix));
     if (finalName != base) {
         hint.prepend(QStringLiteral("「%1」已存在 → 另存为「%2」，与它共用同一文件夹。\n")
                          .arg(base, finalName));

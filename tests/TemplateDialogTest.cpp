@@ -99,6 +99,21 @@ void testTemplateDialogNaming() {
         assert(hint.contains(QString::fromUtf8("机密/")));
     }
 
+    // ── Long names are kept verbatim (the 6-character truncation is gone) ──
+    {
+        const char* longText = "本文件仅供内部使用，未经许可不得外传";
+        const WatermarkTemplate t = driveDialog(WatermarkTemplate{}, true, {}, {}, longText);
+        assert(t.name == longText);
+        assert(t.folderName() == longText);      // becomes the folder as-is
+        assert(t.outputFolder.empty());          // ...bounded only when written
+
+        // A long typed name is kept too, and does not collide with anything.
+        const WatermarkTemplate typed =
+            driveDialog(WatermarkTemplate{}, true, {}, {}, "机密", nullptr, nullptr, longText);
+        assert(typed.name == longText);
+        assert(typed.watermarks[0].text == "机密");
+    }
+
     // ── Variant suffix is stored and shown ───────────────────────────────
     {
         const WatermarkTemplate t =

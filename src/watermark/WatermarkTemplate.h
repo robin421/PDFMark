@@ -8,6 +8,15 @@
 
 namespace pdfmark {
 
+// Trims leading/trailing spaces, tabs and newlines. Returns an empty string when
+// the input is blank, so callers can use it for "was anything actually typed?".
+inline std::string trimCopy(const std::string& raw) {
+    const size_t b = raw.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return std::string();
+    const size_t e = raw.find_last_not_of(" \t\r\n");
+    return raw.substr(b, e - b + 1);
+}
+
 // A named, reusable bundle of watermark settings. Every entry carries its own
 // text plus the shared style fields (font, size, rotation, opacity, DPI,
 // JPEG quality) and the per-entry `selected` flag used by "生成所选".
@@ -61,43 +70,25 @@ struct WatermarkTemplate {
 };
 
 // Template names are derived from the watermark text instead of being typed by
-// the user: the first non-empty line, truncated to 6 characters with "...".
-// Chinese characters count as one unit, so counting walks UTF-8 code points.
-inline constexpr int kMaxTemplateNameChars = 6;
-
-// Trims leading/trailing spaces, tabs and newlines. Returns an empty string when
-// the input is blank, so callers can use it for "was anything actually typed?".
-inline std::string trimCopy(const std::string& raw) {
-    const size_t b = raw.find_first_not_of(" \t\r\n");
-    if (b == std::string::npos) return std::string();
-    const size_t e = raw.find_last_not_of(" \t\r\n");
-    return raw.substr(b, e - b + 1);
-}
-
+// the user: the first non-empty line, used VERBATIM — no length limit, so a
+// longer notice ("本文件仅供内部使用，未经许可不得外传") stays readable in the
+// template list instead of turning into "本文件仅供内...".
+//
+// The name is also the default output folder, and a path component cannot be
+// arbitrarily long, so it is bounded where it actually reaches the disk (see
+// boundPathComponent()): truncating it here would lose the user's text in the UI
+// as well, which is what this function used to do.
 inline std::string templateNameFromConfigs(const std::vector<WatermarkConfig>& configs) {
-    std::string text;
     for (const auto& cfg : configs) {
         if (cfg.text.empty()) continue;
-        text = trimCopy(cfg.text);
-        if (!text.empty()) break;
+        std::string text = trimCopy(cfg.text);
+        // Only the first LINE becomes the name (a row cannot contain a newline in
+        // the UI, but a hand-edited template file could).
+        const size_t newline = text.find_first_of("\r\n");
+        if (newline != std::string::npos) text = trimCopy(text.substr(0, newline));
+        if (!text.empty()) return text;
     }
-    if (text.empty()) return std::string();
-
-    size_t chars = 0;
-    size_t cut = text.size();
-    for (size_t i = 0; i < text.size();) {
-        const unsigned char c = static_cast<unsigned char>(text[i]);
-        size_t len = (c < 0x80) ? 1u : (c >= 0xF0 ? 4u : (c >= 0xE0 ? 3u : 2u));
-        if (i + len > text.size()) len = 1;
-        if (chars == static_cast<size_t>(kMaxTemplateNameChars)) {
-            cut = i;
-            break;
-        }
-        ++chars;
-        i += len;
-    }
-    if (cut < text.size()) return text.substr(0, cut) + "...";
-    return text;
+    return std::string();
 }
 
 // Trims every line and derives a name when none was given.
