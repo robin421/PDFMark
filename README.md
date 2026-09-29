@@ -7,6 +7,11 @@
 
 > 将水印**彻底烧录**进 PDF 的每一页像素层——既抗 OCR 提取，又消除原始矢量/文本层隐患。
 
+![PDFMark 主界面](docs/screenshot-main.png)
+
+<sub>主界面：左侧勾选待处理的 PDF，右侧勾选水印模板并设置输出目录，底部一次性生成。<br>
+模板编辑器见 [`docs/screenshot-template-editor.png`](docs/screenshot-template-editor.png)。</sub>
+
 ## 背景
 
 普通水印工具会在 PDF 之上叠加一个独立的水印对象，攻击者只要用 PDF 编辑器选中删除即可剥离。
