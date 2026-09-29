@@ -150,17 +150,29 @@ MainWindow::~MainWindow() = default;
 
 void MainWindow::setupUi() {
     // ── menu bar (in-window on Windows, in the system bar on macOS) ────────
+    // QAction is built explicitly: the (text, shortcut, receiver, slot) overload of
+    // QMenu::addAction only exists in newer Qt, and the Windows build uses 6.2.
     QMenu* fileMenu = menuBar()->addMenu("文件(&F)");
-    fileMenu->addAction("添加 PDF 文件...(&O)", QKeySequence::Open, this, &MainWindow::onAddFiles);
-    fileMenu->addAction("添加文件夹...(&D)", this, &MainWindow::onAddFolder);
+    auto addAction = [](QMenu* menu, const QString& text, const QKeySequence& shortcut,
+                        QObject* receiver, void (MainWindow::*slot)()) {
+        QAction* action = menu->addAction(text);
+        if (!shortcut.isEmpty()) action->setShortcut(shortcut);
+        QObject::connect(action, &QAction::triggered, receiver, slot);
+        return action;
+    };
+    addAction(fileMenu, "添加 PDF 文件...(&O)", QKeySequence::Open, this, &MainWindow::onAddFiles);
+    addAction(fileMenu, "添加文件夹...(&D)", QKeySequence(), this, &MainWindow::onAddFolder);
     fileMenu->addSeparator();
-    fileMenu->addAction("清空文件列表(&C)", this, &MainWindow::onClearFiles);
+    addAction(fileMenu, "清空文件列表(&C)", QKeySequence(), this, &MainWindow::onClearFiles);
     fileMenu->addSeparator();
-    fileMenu->addAction("退出(&X)", QKeySequence::Quit, this, &QWidget::close);
+    QAction* quitAction = fileMenu->addAction("退出(&X)");
+    quitAction->setShortcut(QKeySequence::Quit);
+    connect(quitAction, &QAction::triggered, this, &QWidget::close);
 
     QMenu* helpMenu = menuBar()->addMenu("帮助(&H)");
-    helpMenu->addAction("检查更新(&U)...", this, &MainWindow::onCheckForUpdates);
-    helpMenu->addAction("打开日志目录(&L)...", this, []() {
+    addAction(helpMenu, "检查更新(&U)...", QKeySequence(), this, &MainWindow::onCheckForUpdates);
+    QAction* logAction = helpMenu->addAction("打开日志目录(&L)...");
+    connect(logAction, &QAction::triggered, this, []() {
         const QString logDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
         QDesktopServices::openUrl(QUrl::fromLocalFile(logDir));
     });
