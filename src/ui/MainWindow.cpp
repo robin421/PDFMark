@@ -153,8 +153,10 @@ void MainWindow::setupUi() {
     // QAction is built explicitly: the (text, shortcut, receiver, slot) overload of
     // QMenu::addAction only exists in newer Qt, and the Windows build uses 6.2.
     QMenu* fileMenu = menuBar()->addMenu("文件(&F)");
+    // NB: the receiver parameter is MainWindow* (not QObject*): the PMF overload of
+    // connect() needs the exact class type, and MSVC rejects the base pointer.
     auto addAction = [](QMenu* menu, const QString& text, const QKeySequence& shortcut,
-                        QObject* receiver, void (MainWindow::*slot)()) {
+                        MainWindow* receiver, void (MainWindow::*slot)()) {
         QAction* action = menu->addAction(text);
         if (!shortcut.isEmpty()) action->setShortcut(shortcut);
         QObject::connect(action, &QAction::triggered, receiver, slot);
