@@ -17,6 +17,7 @@ class QDoubleSpinBox;
 class QFontComboBox;
 class QCheckBox;
 class QComboBox;
+class QScrollArea;
 class QLabel;
 class QPushButton;
 
@@ -48,6 +49,9 @@ private:
     WatermarkConfig styleFromUi() const;
     void refreshPreview();
     void refreshOutputHint();
+    // Grow/shrink the text list with its content (keeps a one-line template from
+    // showing an empty 120px field).
+    void updateTextAreaHeight();
     void applyStyleToUi(const WatermarkConfig& style);
     void accept() override;
 
@@ -65,6 +69,7 @@ private:
     QLineEdit* variantEdit_ = nullptr;
     QComboBox* folderCombo_ = nullptr;
     QLabel* outputHint_ = nullptr;
+    QScrollArea* rowsScroll_ = nullptr;
     QWidget* rowsContainer_ = nullptr;
     QVBoxLayout* rowsLayout_ = nullptr;
     QSpinBox* depthSpin_ = nullptr;

@@ -1,6 +1,7 @@
 #include <QApplication>
 #include <QIcon>
 #include "ui/MainWindow.h"
+#include "ui/Theme.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -205,6 +206,7 @@ int main(int argc, char *argv[]) {
         QApplication app(argc, argv);
 
         QApplication::setWindowIcon(QIcon(":/icons/app_icon.png"));
+        pdfmark::theme::apply(app);
         QApplication::setApplicationName("PDFMark");
         QApplication::setApplicationDisplayName("PDFMark");
         QApplication::setOrganizationName("PDFMark");

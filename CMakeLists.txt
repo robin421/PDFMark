@@ -102,6 +102,10 @@ add_library(pdfmark_core STATIC
     src/diagnostics/CrashReporter.cpp
     src/ui/TemplateEditDialog.h
     src/ui/TemplateEditDialog.cpp
+    src/ui/Theme.h
+    src/ui/Theme.cpp
+    src/ui/TemplateListDelegate.h
+    src/ui/TemplateListDelegate.cpp
     src/updater/AutoUpdater.h
     src/updater/AutoUpdater.cpp
     src/updater/UpdateDialog.h

@@ -19,6 +19,7 @@
 #include <QPushButton>
 #include <QVBoxLayout>
 #include <QListWidget>
+#include <QStackedWidget>
 #include <QHash>
 #include <QShortcut>
 
@@ -84,6 +85,10 @@ private:
 
     // ── Template list ───────────────────────────────────────────────────
     void refreshTemplateList(const QString& select = QString());
+    // One refresh for everything that depends on the PDF list (counts, buttons,
+    // empty state) — adding files used to leave the summary and the 生成 buttons
+    // stale until some other interaction happened.
+    void refreshFileListUi();
     WatermarkTemplate selectedTemplate() const;               // invalid when none
     std::vector<WatermarkTemplate> checkedTemplates() const;  // checked & usable
     int checkedTemplateCount() const;
@@ -130,6 +135,12 @@ private:
 
     // ── Widgets: file list ──────────────────────────────────────────────
     QTableWidget* fileTable_ = nullptr;
+    QStackedWidget* fileStack_ = nullptr;      // empty hint <-> table
+    QLabel* fileCountLabel_ = nullptr;         // "已勾选 3 / 3"
+    QPushButton* addFilesBtn_ = nullptr;
+    QPushButton* addFolderBtn_ = nullptr;
+    QPushButton* removeSelBtn_ = nullptr;
+    QPushButton* clearFilesBtn_ = nullptr;
     QPushButton* selectAllBtn_ = nullptr;
     QPushButton* selectNoneBtn_ = nullptr;
     QHash<QString, int> fileNameToRow_;  // basename -> file table row
@@ -137,6 +148,8 @@ private:
 
     // ── Widgets: templates ──────────────────────────────────────────────
     QListWidget* templateList_ = nullptr;
+    QStackedWidget* templateStack_ = nullptr;  // empty hint <-> list
+    QLabel* templateCountLabel_ = nullptr;     // "已选 7 / 7"
     QPushButton* newTemplateBtn_ = nullptr;
     QPushButton* editTemplateBtn_ = nullptr;
     QPushButton* deleteTemplateBtn_ = nullptr;

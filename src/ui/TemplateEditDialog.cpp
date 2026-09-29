@@ -72,7 +72,7 @@ TemplateEditDialog::TemplateEditDialog(const WatermarkTemplate& initial, bool cr
 
 void TemplateEditDialog::buildUi(bool creating) {
     setWindowTitle(creating ? QStringLiteral("新建水印模板") : QStringLiteral("编辑水印模板"));
-    setMinimumSize(760, 620);
+    setMinimumSize(780, 640);
     setSizeGripEnabled(true);
 
     auto* root = new QVBoxLayout(this);
@@ -134,7 +134,7 @@ void TemplateEditDialog::buildUi(bool creating) {
     outputHint_ = new QLabel(outGroup);
     outputHint_->setObjectName(QStringLiteral("templateOutputHint"));
     outputHint_->setWordWrap(true);
-    outputHint_->setStyleSheet("color:#555555; font-size:11px;");
+
     outGrid->addWidget(outputHint_, 2, 0, 1, 2);
     left->addWidget(outGroup);
 
@@ -143,10 +143,11 @@ void TemplateEditDialog::buildUi(bool creating) {
     textLayout->setContentsMargins(10, 12, 10, 10);
     textLayout->setSpacing(6);
 
-    auto* scroll = new QScrollArea(textGroup);
+    rowsScroll_ = new QScrollArea(textGroup);
+    auto* scroll = rowsScroll_;
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
-    scroll->setMinimumHeight(120);
+    scroll->setFixedHeight(40);   // real height comes from updateTextAreaHeight()
     rowsContainer_ = new QWidget(scroll);
     rowsLayout_ = new QVBoxLayout(rowsContainer_);
     rowsLayout_->setContentsMargins(0, 0, 0, 0);
@@ -156,10 +157,10 @@ void TemplateEditDialog::buildUi(bool creating) {
     textLayout->addWidget(scroll, 1);
 
     auto* addRow = new QPushButton(QStringLiteral("+ 添加一行"), textGroup);
-    addRow->setStyleSheet("padding:5px 12px;");
+    addRow->setObjectName("ghost");
     connect(addRow, &QPushButton::clicked, this, [this]() { addTextRow(QString()); });
     textLayout->addWidget(addRow, 0, Qt::AlignLeft);
-    left->addWidget(textGroup, 1);
+    left->addWidget(textGroup);
 
     auto* styleGroup = new QGroupBox(QStringLiteral("水印样式"), this);
     auto* grid = new QGridLayout(styleGroup);
@@ -179,7 +180,7 @@ void TemplateEditDialog::buildUi(bool creating) {
     depthSpin_->setRange(5, 60);
     depthSpin_->setSuffix(" %");
     depthHint_ = new QLabel(depthBox);
-    depthHint_->setStyleSheet("color:#777777; font-size:11px;");
+    depthHint_->setObjectName("hint");
     depthHint_->setFixedWidth(30);
     depthLayout->addWidget(depthSlider_, 1);
     depthLayout->addWidget(depthSpin_);
@@ -214,6 +215,7 @@ void TemplateEditDialog::buildUi(bool creating) {
     r++;
 
     left->addWidget(styleGroup);
+    left->addStretch();   // leftover height stays below the style card
     body->addLayout(left, 3);
 
     // ── Right: live preview ─────────────────────────────────────────────
@@ -222,7 +224,7 @@ void TemplateEditDialog::buildUi(bool creating) {
     previewLayout->setContentsMargins(10, 12, 10, 10);
     previewLabel_ = new QLabel(previewGroup);
     previewLabel_->setAlignment(Qt::AlignCenter);
-    previewLabel_->setStyleSheet("background:white; border:1px solid #dde3ea;");
+    previewLabel_->setObjectName("previewFrame");
     previewLabel_->setMinimumWidth(300);
     previewLayout->addWidget(previewLabel_, 1);
     body->addWidget(previewGroup, 2);
@@ -233,14 +235,12 @@ void TemplateEditDialog::buildUi(bool creating) {
     auto* btnRow = new QHBoxLayout();
     btnRow->addStretch();
     auto* cancelBtn = new QPushButton(QStringLiteral("取消"), this);
-    cancelBtn->setStyleSheet("padding:6px 20px;");
+    cancelBtn->setObjectName("ghost");
     connect(cancelBtn, &QPushButton::clicked, this, &QDialog::reject);
     auto* okBtn = new QPushButton(creating ? QStringLiteral("创建模板") : QStringLiteral("保存"),
                                   this);
     okBtn->setDefault(true);
-    okBtn->setStyleSheet(
-        "QPushButton{background:#0078d4;color:white;font-weight:bold;padding:6px 22px;"
-        "border-radius:4px;} QPushButton:hover{background:#106ebe;}");
+    okBtn->setObjectName("primary");
     connect(okBtn, &QPushButton::clicked, this, &TemplateEditDialog::accept);
     btnRow->addWidget(cancelBtn);
     btnRow->addWidget(okBtn);
@@ -286,7 +286,7 @@ void TemplateEditDialog::addTextRow(const QString& text, int insertAt) {
 
     auto* remove = new QPushButton("×", row);
     remove->setFixedSize(26, 26);
-    remove->setStyleSheet("color:#cc0000; font-weight:bold; font-size:15px;");
+    remove->setObjectName("rowRemove");
     remove->setToolTip(QStringLiteral("删除这一行"));
     h->addWidget(remove);
 
@@ -296,11 +296,25 @@ void TemplateEditDialog::addTextRow(const QString& text, int insertAt) {
     const int count = rowsLayout_->count();
     const int index = (insertAt >= 0 && insertAt <= count) ? insertAt : count - 1;
     rowsLayout_->insertWidget(std::max(0, index), row);
+    updateTextAreaHeight();
 }
 
 void TemplateEditDialog::removeTextRow(QWidget* row) {
     row->deleteLater();
+    updateTextAreaHeight();
     refreshPreview();
+}
+
+// The list grows with the number of lines (1..6 rows) instead of always occupying
+// a fixed 120px block with empty space below a single row.
+void TemplateEditDialog::updateTextAreaHeight() {
+    if (!rowsLayout_) return;
+    int lines = 0;
+    for (int i = 0; i < rowsLayout_->count(); ++i) {
+        if (qobject_cast<QWidget*>(rowsLayout_->itemAt(i)->widget())) ++lines;
+    }
+    const int visible = std::clamp(lines, 1, 6);
+    if (rowsScroll_) rowsScroll_->setFixedHeight(visible * 34 + 10);
 }
 
 std::vector<WatermarkConfig> TemplateEditDialog::linesFromUi() const {

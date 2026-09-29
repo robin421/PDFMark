@@ -1,5 +1,8 @@
 // PDFMark - Main GUI Window implementation.
 #include "ui/MainWindow.h"
+#include "ui/Theme.h"
+#include "ui/TemplateListDelegate.h"
+#include "common/Common.h"
 #include "ui/TemplateEditDialog.h"
 #include "ui/FileTableSelection.h"
 #include "ui/PasswordDialog.h"
@@ -39,6 +42,10 @@
 #include <QInputDialog>
 #include <QCheckBox>
 #include <QMap>
+#include <QStackedWidget>
+#include <QIcon>
+#include <QMenu>
+#include <QAction>
 #include <QRadioButton>
 #include <QStackedWidget>
 #include <QThread>
@@ -57,6 +64,59 @@ static constexpr int kThrottleMs = 30;
 
 // File table layout. Only two columns are visible; everything else the logic
 // needs is stored in data roles on the name item.
+
+namespace {
+
+// ── small builders so setupUi() reads like the layout it produces ──────────
+QFrame* makeCard(QWidget* parent) {
+    auto* card = new QFrame(parent);
+    card->setObjectName("card");
+    card->setFrameShape(QFrame::NoFrame);
+    return card;
+}
+
+QLabel* makeSectionTitle(const QString& text, QWidget* parent) {
+    auto* label = new QLabel(text, parent);
+    label->setObjectName("sectionTitle");
+    return label;
+}
+
+QLabel* makeCountLabel(QWidget* parent) {
+    auto* label = new QLabel(parent);
+    label->setObjectName("chip");
+    label->setTextFormat(Qt::RichText);
+    return label;
+}
+
+QPushButton* makeButton(const QString& text, const char* kind, const QString& tip, QWidget* parent) {
+    auto* button = new QPushButton(text, parent);
+    if (kind && *kind) button->setObjectName(kind);
+    if (!tip.isEmpty()) button->setToolTip(tip);
+    return button;
+}
+
+// Centered hint shown instead of an empty list/table.
+QWidget* makeEmptyPage(const QString& title, const QString& subtitle, QWidget* parent) {
+    auto* page = new QWidget(parent);
+    auto* layout = new QVBoxLayout(page);
+    layout->setContentsMargins(24, 24, 24, 24);
+    layout->setSpacing(6);
+    layout->addStretch();
+    auto* heading = new QLabel(title, page);
+    heading->setObjectName("emptyTitle");
+    heading->setAlignment(Qt::AlignCenter);
+    auto* hint = new QLabel(subtitle, page);
+    hint->setAlignment(Qt::AlignCenter);
+    hint->setWordWrap(true);
+    hint->setObjectName("hint");
+    layout->addWidget(heading);
+    layout->addWidget(hint);
+    layout->addStretch();
+    return page;
+}
+
+} // namespace
+
 static constexpr int kCheckColumn = 0;
 static constexpr int kNameColumn  = 1;
 static constexpr int kPathRole    = Qt::UserRole;
@@ -68,25 +128,16 @@ MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent) {
     setupUi();
     setupConnections();
-    setWindowTitle("PDF 水印固化工具");
-    resize(1100, 720);
+    setWindowTitle("PDFMark — PDF 水印固化工具");
+    setMinimumSize(940, 620);
+    resize(1180, 780);
 
     templateStore_.load();
     refreshTemplateList();
     updateUiState(false);
 
-    // Auto-update: create updater, add Help menu, and do a silent background check
+    // Auto-update: create the updater; the Help menu lives in setupUi().
     autoUpdater_ = new AutoUpdater(this);
-
-    QMenu* helpMenu = menuBar()->addMenu("帮助(&H)");
-    QAction* checkUpdateAct = helpMenu->addAction("检查更新(&U)...");
-    connect(checkUpdateAct, &QAction::triggered, this, &MainWindow::onCheckForUpdates);
-
-    QAction* openLogAct = helpMenu->addAction("打开日志目录(&L)...");
-    connect(openLogAct, &QAction::triggered, this, []() {
-        QString logDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-        QDesktopServices::openUrl(QUrl::fromLocalFile(logDir));
-    });
     // Background silent check 2 seconds after startup
     QTimer::singleShot(2000, this, [this]() {
         connect(autoUpdater_, &AutoUpdater::updateAvailable,
@@ -98,221 +149,233 @@ MainWindow::MainWindow(QWidget* parent)
 MainWindow::~MainWindow() = default;
 
 void MainWindow::setupUi() {
-    auto* centralWidget = new QWidget(this);
-    setCentralWidget(centralWidget);
-    auto* mainLayout = new QVBoxLayout(centralWidget);
-    mainLayout->setContentsMargins(12, 12, 12, 12);
-    mainLayout->setSpacing(10);
+    // ── menu bar (in-window on Windows, in the system bar on macOS) ────────
+    QMenu* fileMenu = menuBar()->addMenu("文件(&F)");
+    fileMenu->addAction("添加 PDF 文件...(&O)", QKeySequence::Open, this, &MainWindow::onAddFiles);
+    fileMenu->addAction("添加文件夹...(&D)", this, &MainWindow::onAddFolder);
+    fileMenu->addSeparator();
+    fileMenu->addAction("清空文件列表(&C)", this, &MainWindow::onClearFiles);
+    fileMenu->addSeparator();
+    fileMenu->addAction("退出(&X)", QKeySequence::Quit, this, &QWidget::close);
 
-    // 1. Top action buttons
-    auto* topBox = new QGroupBox("文件列表操作", this);
-    auto* topLayout = new QHBoxLayout(topBox);
-    topLayout->setContentsMargins(8, 8, 8, 8);
-    topLayout->setSpacing(8);
-    auto* addFilesBtn = new QPushButton("添加 PDF 文件...", topBox);
-    auto* addFolderBtn = new QPushButton("添加文件夹...", topBox);
-    auto* clearBtn = new QPushButton("清空列表", topBox);
-    auto* removeSelBtn = new QPushButton("删除选中文件", topBox);
-    selectAllBtn_ = new QPushButton("全选", topBox);
-    selectNoneBtn_ = new QPushButton("全不选", topBox);
-    addFilesBtn->setStyleSheet("padding: 6px 14px; font-weight: bold;");
-    addFolderBtn->setStyleSheet("padding: 6px 14px;");
-    clearBtn->setStyleSheet("padding: 6px 14px;");
-    removeSelBtn->setStyleSheet("padding: 6px 14px; color: #cc0000;");
-    selectAllBtn_->setStyleSheet("padding: 6px 10px;");
-    selectNoneBtn_->setStyleSheet("padding: 6px 10px;");
-    selectAllBtn_->setToolTip("勾选列表中的所有 PDF");
-    selectNoneBtn_->setToolTip("取消勾选所有 PDF");
+    QMenu* helpMenu = menuBar()->addMenu("帮助(&H)");
+    helpMenu->addAction("检查更新(&U)...", this, &MainWindow::onCheckForUpdates);
+    helpMenu->addAction("打开日志目录(&L)...", this, []() {
+        const QString logDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+        QDesktopServices::openUrl(QUrl::fromLocalFile(logDir));
+    });
 
-    topLayout->addWidget(addFilesBtn);
-    topLayout->addWidget(addFolderBtn);
-    topLayout->addWidget(clearBtn);
-    topLayout->addWidget(removeSelBtn);
-    topLayout->addSpacing(12);
-    topLayout->addWidget(selectAllBtn_);
-    topLayout->addWidget(selectNoneBtn_);
-    topLayout->addStretch();
-    mainLayout->addWidget(topBox);
+    auto* central = new QWidget(this);
+    setCentralWidget(central);
+    auto* root = new QVBoxLayout(central);
+    root->setContentsMargins(14, 12, 14, 12);
+    root->setSpacing(10);
 
-    connect(addFilesBtn, &QPushButton::clicked, this, &MainWindow::onAddFiles);
-    connect(addFolderBtn, &QPushButton::clicked, this, &MainWindow::onAddFolder);
-    connect(clearBtn, &QPushButton::clicked, this, &MainWindow::onClearFiles);
-    connect(removeSelBtn, &QPushButton::clicked, this, &MainWindow::onRemoveSelectedFile);
+    // ── header: product name + one-line hint ──────────────────────────────
+    auto* header = new QHBoxLayout();
+    header->setSpacing(8);
+    auto* mark = new QLabel(central);
+    mark->setPixmap(QIcon(":/icons/app_icon.png").pixmap(20, 20));
+    auto* title = new QLabel(QString(
+        "<span style='font-size:15px;font-weight:600;color:%1'>PDFMark</span>"
+        "<span style='font-size:12px;color:%2'>&nbsp;&nbsp;v%3&nbsp;·&nbsp;PDF 水印固化工具</span>")
+        .arg(QLatin1String(theme::kText), QLatin1String(theme::kTextMuted), PDFMARK_VERSION), central);
+    auto* dragHint = new QLabel("拖拽 PDF 文件或文件夹到窗口即可添加", central);
+    dragHint->setObjectName("hint");
+    header->addWidget(mark);
+    header->addWidget(title);
+    header->addStretch();
+    header->addWidget(dragHint);
+    root->addLayout(header);
 
-    // 2. Middle Splitter (Left: file list, Right: templates + output)
-    auto* splitter = new QSplitter(Qt::Horizontal, this);
+    // ── middle: file list (left) + templates & output (right) ─────────────
+    auto* splitter = new QSplitter(Qt::Horizontal, central);
+    splitter->setChildrenCollapsible(false);
+    splitter->setHandleWidth(12);
 
-    // Left: file list (checkbox + file name only)
-    auto* leftContainer = new QWidget(splitter);
-    auto* leftLayout = new QVBoxLayout(leftContainer);
-    leftLayout->setContentsMargins(0, 0, 0, 0);
+    // ── 待处理 PDF ────────────────────────────────────────────────────────
+    auto* filesCard = makeCard(splitter);
+    auto* filesLayout = new QVBoxLayout(filesCard);
+    filesLayout->setContentsMargins(14, 12, 14, 12);
+    filesLayout->setSpacing(10);
 
-    fileTable_ = new QTableWidget(0, 2, leftContainer);
+    auto* filesHead = new QHBoxLayout();
+    filesHead->setSpacing(8);
+    filesHead->addWidget(makeSectionTitle("待处理 PDF", filesCard));
+    fileCountLabel_ = makeCountLabel(filesCard);
+    filesHead->addWidget(fileCountLabel_);
+    filesHead->addStretch();
+    selectAllBtn_ = makeButton("全选", "ghost", "勾选列表中的所有 PDF", filesCard);
+    selectNoneBtn_ = makeButton("全不选", "ghost", "取消勾选所有 PDF", filesCard);
+    filesHead->addWidget(selectAllBtn_);
+    filesHead->addWidget(selectNoneBtn_);
+    filesLayout->addLayout(filesHead);
+
+    auto* filesTools = new QHBoxLayout();
+    filesTools->setSpacing(8);
+    addFilesBtn_ = makeButton("添加 PDF 文件...", "", "选择一个或多个 PDF 文件", filesCard);
+    addFolderBtn_ = makeButton("添加文件夹...", "", "添加整个文件夹中的 PDF", filesCard);
+    removeSelBtn_ = makeButton("移除选中", "ghost", "仅从列表移除，不会删除磁盘上的文件", filesCard);
+    clearFilesBtn_ = makeButton("清空", "ghost", "清空列表（不会删除任何文件）", filesCard);
+    filesTools->addWidget(addFilesBtn_);
+    filesTools->addWidget(addFolderBtn_);
+    filesTools->addSpacing(6);
+    filesTools->addWidget(removeSelBtn_);
+    filesTools->addWidget(clearFilesBtn_);
+    filesTools->addStretch();
+    filesLayout->addLayout(filesTools);
+
+    fileTable_ = new QTableWidget(0, 2, filesCard);
     fileTable_->setHorizontalHeaderLabels({"", "文件名"});
+    if (auto* nameHeader = fileTable_->horizontalHeaderItem(kNameColumn)) {
+        nameHeader->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    }
     fileTable_->horizontalHeader()->setSectionResizeMode(kCheckColumn, QHeaderView::Fixed);
-    fileTable_->horizontalHeader()->resizeSection(kCheckColumn, 34);
+    fileTable_->horizontalHeader()->resizeSection(kCheckColumn, 40);
     fileTable_->horizontalHeader()->setSectionResizeMode(kNameColumn, QHeaderView::Stretch);
+    fileTable_->horizontalHeader()->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    fileTable_->horizontalHeader()->setHighlightSections(false);
     fileTable_->verticalHeader()->setVisible(false);
+    fileTable_->verticalHeader()->setDefaultSectionSize(34);
     fileTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
     fileTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    fileTable_->setAlternatingRowColors(true);
-    leftLayout->addWidget(fileTable_);
+    fileTable_->setShowGrid(false);
+    fileTable_->setWordWrap(false);
+    fileTable_->setFrameShape(QFrame::NoFrame);
+    fileTable_->setAlternatingRowColors(false);
+    fileTable_->setTextElideMode(Qt::ElideMiddle);
+    fileTable_->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
 
-    splitter->addWidget(leftContainer);
+    fileStack_ = new QStackedWidget(filesCard);
+    fileStack_->addWidget(makeEmptyPage("还没有添加 PDF",
+                                       "拖拽文件到窗口，或点击「添加 PDF 文件...」", filesCard));
+    fileStack_->addWidget(fileTable_);
+    filesLayout->addWidget(fileStack_, 1);
+    splitter->addWidget(filesCard);
 
-    // Right: global templates + output settings
-    auto* rightContainer = new QWidget(splitter);
-    auto* rightLayout = new QVBoxLayout(rightContainer);
+    auto* rightColumn = new QWidget(splitter);
+    auto* rightLayout = new QVBoxLayout(rightColumn);
     rightLayout->setContentsMargins(0, 0, 0, 0);
-    rightLayout->setSpacing(8);
+    rightLayout->setSpacing(10);
 
-    // ── Watermark templates (global) ──────────────────────────────────────
-    // There is no per-PDF watermark editing any more: watermarks exist only as
-    // global templates, so one can be created without loading any file.
-    auto* tplGroup = new QGroupBox("水印模板", rightContainer);
-    auto* tplLayout = new QVBoxLayout(tplGroup);
-    tplLayout->setContentsMargins(10, 12, 10, 10);
-    tplLayout->setSpacing(6);
+    // ── 水印模板 ──────────────────────────────────────────────────────────
+    // Watermarks exist only as global templates: one can be created without
+    // loading any PDF.
+    auto* tplCard = makeCard(rightColumn);
+    auto* tplLayout = new QVBoxLayout(tplCard);
+    tplLayout->setContentsMargins(14, 12, 14, 12);
+    tplLayout->setSpacing(10);
 
     auto* tplHead = new QHBoxLayout();
-    tplHead->setSpacing(6);
-    tplHead->addWidget(new QLabel("勾选要使用的模板（可多选）:", tplGroup));
+    tplHead->setSpacing(8);
+    tplHead->addWidget(makeSectionTitle("水印模板", tplCard));
+    templateCountLabel_ = makeCountLabel(tplCard);
+    tplHead->addWidget(templateCountLabel_);
     tplHead->addStretch();
-    selectAllTemplatesBtn_ = new QPushButton("全选", tplGroup);
-    selectNoneTemplatesBtn_ = new QPushButton("全不选", tplGroup);
-    selectAllTemplatesBtn_->setStyleSheet("padding:3px 10px;");
-    selectNoneTemplatesBtn_->setStyleSheet("padding:3px 10px;");
-    selectAllTemplatesBtn_->setToolTip("勾选全部模板");
-    selectNoneTemplatesBtn_->setToolTip("取消勾选全部模板");
+    selectAllTemplatesBtn_ = makeButton("全选", "ghost", "勾选全部模板", tplCard);
+    selectNoneTemplatesBtn_ = makeButton("全不选", "ghost", "取消勾选全部模板", tplCard);
     tplHead->addWidget(selectAllTemplatesBtn_);
     tplHead->addWidget(selectNoneTemplatesBtn_);
     tplLayout->addLayout(tplHead);
 
-    templateList_ = new QListWidget(tplGroup);
+    templateList_ = new QListWidget(tplCard);
     templateList_->setSelectionMode(QAbstractItemView::SingleSelection);
     templateList_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    templateList_->setAlternatingRowColors(true);
-    // Template names are no longer capped, so a long one must not force a
-    // horizontal scrollbar: elide the shown text (the full name stays in the item
-    // data and in the tooltip).
-    templateList_->setTextElideMode(Qt::ElideRight);
-    templateList_->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    templateList_->setToolTip("勾选的模板参与生成；选中某项后可用下方按钮编辑/删除/预览");
-    tplLayout->addWidget(templateList_, 1);
+    templateList_->setItemDelegate(new TemplateListDelegate(templateList_));
+    templateList_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    templateList_->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    templateList_->setToolTip("勾选的模板参与生成；双击可编辑");
 
-    auto* tplBtns = new QHBoxLayout();
-    tplBtns->setSpacing(6);
-    newTemplateBtn_ = new QPushButton("新建模板...", tplGroup);
-    newTemplateBtn_->setStyleSheet("padding:6px 14px; font-weight:bold;");
-    newTemplateBtn_->setToolTip("新建一个全局水印模板（无需先添加 PDF）");
-    editTemplateBtn_ = new QPushButton("编辑...", tplGroup);
-    editTemplateBtn_->setStyleSheet("padding:6px 14px;");
-    deleteTemplateBtn_ = new QPushButton("删除", tplGroup);
-    deleteTemplateBtn_->setStyleSheet("padding:6px 14px; color:#cc0000;");
-    previewTemplateBtn_ = new QPushButton("预览", tplGroup);
-    previewTemplateBtn_->setStyleSheet("padding:6px 14px;");
-    previewTemplateBtn_->setToolTip("预览选中模板在 PDF 页面上的实际效果");
-    tplBtns->addWidget(newTemplateBtn_);
-    tplBtns->addWidget(editTemplateBtn_);
-    tplBtns->addWidget(previewTemplateBtn_);
-    tplBtns->addWidget(deleteTemplateBtn_);
-    tplBtns->addStretch();
-    tplLayout->addLayout(tplBtns);
-    rightLayout->addWidget(tplGroup, 1);
+    templateStack_ = new QStackedWidget(tplCard);
+    templateStack_->addWidget(makeEmptyPage("还没有水印模板",
+                                            "点击「新建模板...」创建（不需要先添加 PDF）", tplCard));
+    templateStack_->addWidget(templateList_);
+    tplLayout->addWidget(templateStack_, 1);
 
-    summaryLabel_ = new QLabel(rightContainer);
-    summaryLabel_->setWordWrap(true);
-    summaryLabel_->setStyleSheet(
-        "color:#3a3a3a; background:#f7f9fc; border:1px solid #dde3ea; "
-        "border-radius:4px; padding:8px;");
-    summaryLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    rightLayout->addWidget(summaryLabel_);
+    auto* tplButtons = new QHBoxLayout();
+    tplButtons->setSpacing(8);
+    newTemplateBtn_ = makeButton("新建模板...", "", "新建一个全局水印模板（无需先添加 PDF）", tplCard);
+    editTemplateBtn_ = makeButton("编辑...", "", "修改选中模板的名称 / 文字 / 样式 / 输出命名", tplCard);
+    previewTemplateBtn_ = makeButton("预览", "ghost", "预览选中模板在 PDF 页面上的实际效果", tplCard);
+    deleteTemplateBtn_ = makeButton("删除", "danger", "删除选中的模板（不会删除已生成的输出）", tplCard);
+    tplButtons->addWidget(newTemplateBtn_);
+    tplButtons->addWidget(editTemplateBtn_);
+    tplButtons->addStretch();
+    tplButtons->addWidget(previewTemplateBtn_);
+    tplButtons->addWidget(deleteTemplateBtn_);
+    tplLayout->addLayout(tplButtons);
+    rightLayout->addWidget(tplCard, 1);
 
-    // ── Output settings (shared by both modes) ───────────────────────────
-    auto* outGroup = new QGroupBox("输出", rightContainer);
-    auto* outGrid = new QGridLayout(outGroup);
-    outGrid->setContentsMargins(10, 12, 10, 10);
-    outGrid->setHorizontalSpacing(10);
-    outGrid->setVerticalSpacing(10);
+    // ── 输出 ──────────────────────────────────────────────────────────────
+    auto* outCard = makeCard(rightColumn);
+    auto* outLayout = new QVBoxLayout(outCard);
+    outLayout->setContentsMargins(14, 12, 14, 12);
+    outLayout->setSpacing(8);
+    outLayout->addWidget(makeSectionTitle("输出", outCard));
 
-    outGrid->addWidget(new QLabel("输出目录:"), 0, 0);
-    outputDirEdit_ = new QLineEdit(outGroup);
-    outputDirEdit_->setPlaceholderText("默认与源文件相同目录");
-    auto* browseBtn = new QPushButton("选择...", outGroup);
-    browseBtn->setStyleSheet("padding: 4px 10px;");
-    outGrid->addWidget(outputDirEdit_, 0, 1);
-    outGrid->addWidget(browseBtn, 0, 2);
-    connect(browseBtn, &QPushButton::clicked, this, &MainWindow::onSelectOutputDir);
-
-    // "打开生成文件夹" belongs with the output settings, not the file list.
-    openFolderBtn_ = new QPushButton("打开生成文件夹", outGroup);
+    auto* outRow = new QHBoxLayout();
+    outRow->setSpacing(8);
+    outputDirEdit_ = new QLineEdit(outCard);
+    outputDirEdit_->setPlaceholderText("默认与源 PDF 相同目录");
+    auto* browseBtn = makeButton("选择...", "", "选择一个统一的输出目录", outCard);
+    openFolderBtn_ = makeButton("打开生成文件夹", "ghost",
+                                "在 Finder / 资源管理器中打开上次生成的目录", outCard);
     openFolderBtn_->setEnabled(false);
-    openFolderBtn_->setStyleSheet("padding: 4px 10px;");
-    openFolderBtn_->setToolTip("在 Finder / 资源管理器中打开上次生成的 PDF 所在目录");
-    connect(openFolderBtn_, &QPushButton::clicked, this, &MainWindow::onOpenOutputFolder);
-    outGrid->addWidget(openFolderBtn_, 0, 3);
-    rightLayout->addWidget(outGroup);
+    outRow->addWidget(outputDirEdit_, 1);
+    outRow->addWidget(browseBtn);
+    outRow->addWidget(openFolderBtn_);
+    outLayout->addLayout(outRow);
 
-    splitter->addWidget(rightContainer);
+    auto* outHint = new QLabel("留空 = 写到源 PDF 所在目录；每个模板使用自己的子目录", outCard);
+    outHint->setObjectName("hint");
+    outLayout->addWidget(outHint);
+    rightLayout->addWidget(outCard);
+
+    splitter->addWidget(rightColumn);
     splitter->setStretchFactor(0, 3);
     splitter->setStretchFactor(1, 2);
-    mainLayout->addWidget(splitter, 1);
+    splitter->setSizes({700, 460});
+    root->addWidget(splitter, 1);
 
-    // 3. Bottom status & execution controls (no GroupBox frame — flat design)
-    auto* statusCard = new QFrame(centralWidget);
-    statusCard->setFrameShape(QFrame::StyledPanel);
-    statusCard->setStyleSheet("QFrame { background-color: #f5f7fa; border-radius: 6px; }");
-    auto* statusLayout = new QVBoxLayout(statusCard);
-    statusLayout->setContentsMargins(12, 8, 12, 8);
-    statusLayout->setSpacing(6);
+    // ── bottom action bar ─────────────────────────────────────────────────
+    auto* actionBar = makeCard(central);
+    auto* actionLayout = new QVBoxLayout(actionBar);
+    actionLayout->setContentsMargins(14, 12, 14, 12);
+    actionLayout->setSpacing(10);
 
-    // Progress bars row
-    auto* progRow = new QHBoxLayout();
-    progRow->addWidget(new QLabel("总体进度:"));
-    totalProgressBar_ = new QProgressBar(statusCard);
+    auto* actionRow = new QHBoxLayout();
+    actionRow->setSpacing(10);
+    summaryLabel_ = new QLabel(actionBar);
+    summaryLabel_->setObjectName("chip");
+    summaryLabel_->setTextFormat(Qt::RichText);
+    summaryLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    cancelBtn_ = makeButton("取消", "ghost", "停止当前批次（已完成的文件会保留）", actionBar);
+    cancelBtn_->setEnabled(false);
+    startCheckedBtn_ = makeButton("生成勾选的 PDF", "", "只生成左侧已勾选的 PDF", actionBar);
+    startCheckedBtn_->setEnabled(false);
+    startAllBtn_ = makeButton("生成全部 PDF", "primary", "生成列表中的所有 PDF", actionBar);
+    startAllBtn_->setEnabled(false);
+    actionRow->addWidget(summaryLabel_, 1);
+    actionRow->addWidget(cancelBtn_);
+    actionRow->addWidget(startCheckedBtn_);
+    actionRow->addWidget(startAllBtn_);
+    actionLayout->addLayout(actionRow);
+
+    auto* progressRow = new QHBoxLayout();
+    progressRow->setSpacing(12);
+    statusLabel_ = new QLabel("就绪。添加 PDF 并勾选模板后即可开始。", actionBar);
+    statusLabel_->setObjectName("hint");
+    totalProgressBar_ = new QProgressBar(actionBar);
     totalProgressBar_->setRange(0, 100);
     totalProgressBar_->setValue(0);
     totalProgressBar_->setTextVisible(true);
-    progRow->addWidget(totalProgressBar_);
-    statusLayout->addLayout(progRow);
-    // Control row
-    auto* ctlRow = new QHBoxLayout();
-    statusLabel_ = new QLabel("就绪。请添加 PDF 文件后配置水印并开始批量固化。", statusCard);
-    statusLabel_->setStyleSheet("color: #555555; font-size: 13px;");
-    ctlRow->addWidget(statusLabel_, 1);
+    totalProgressBar_->setFixedWidth(240);
+    progressRow->addWidget(statusLabel_, 1);
+    progressRow->addWidget(totalProgressBar_);
+    actionLayout->addLayout(progressRow);
+    root->addWidget(actionBar);
 
-    // 性能模式紧挨着生成按钮，运行时最常调的开关就在这里
-    cancelBtn_ = new QPushButton("取消", statusCard);
-    cancelBtn_->setEnabled(false);
-    cancelBtn_->setStyleSheet("padding: 5px 12px;");
-    connect(cancelBtn_, &QPushButton::clicked, this, &MainWindow::onCancelClicked);
-    ctlRow->addWidget(cancelBtn_);
-
-    startCheckedBtn_ = new QPushButton("生成勾选的 PDF", statusCard);
-    startCheckedBtn_->setEnabled(false);
-    startCheckedBtn_->setToolTip("只生成左侧已勾选的 PDF");
-    startCheckedBtn_->setStyleSheet(
-        "QPushButton { background-color: #107c10; color: white; font-weight: bold; "
-        "padding: 7px 16px; border-radius: 4px; font-size: 14px; }"
-        "QPushButton:hover { background-color: #0b5c0b; }"
-        "QPushButton:pressed { background-color: #094509; }"
-        "QPushButton:disabled { background-color: #cccccc; color: #888888; }");
-    connect(startCheckedBtn_, &QPushButton::clicked, this, &MainWindow::onStartCheckedClicked);
-    ctlRow->addWidget(startCheckedBtn_);
-
-    startAllBtn_ = new QPushButton("生成全部 PDF", statusCard);
-    startAllBtn_->setToolTip("生成列表中的所有 PDF");
-    startAllBtn_->setStyleSheet(
-        "QPushButton { background-color: #0078d4; color: white; font-weight: bold; "
-        "padding: 7px 16px; border-radius: 4px; font-size: 14px; }"
-        "QPushButton:hover { background-color: #106ebe; }"
-        "QPushButton:pressed { background-color: #005a9e; }"
-        "QPushButton:disabled { background-color: #cccccc; color: #888888; }");
-    connect(startAllBtn_, &QPushButton::clicked, this, &MainWindow::onStartAllClicked);
-    ctlRow->addWidget(startAllBtn_);
-
-    statusLayout->addLayout(ctlRow);
-    mainLayout->addWidget(statusCard);
+    connect(browseBtn, &QPushButton::clicked, this, &MainWindow::onSelectOutputDir);
 }
 
 void MainWindow::setupConnections() {
@@ -340,6 +403,15 @@ void MainWindow::setupConnections() {
             updateUiState(taskManager_.isRunning());
         }
     });
+
+    connect(addFilesBtn_, &QPushButton::clicked, this, &MainWindow::onAddFiles);
+    connect(addFolderBtn_, &QPushButton::clicked, this, &MainWindow::onAddFolder);
+    connect(removeSelBtn_, &QPushButton::clicked, this, &MainWindow::onRemoveSelectedFile);
+    connect(clearFilesBtn_, &QPushButton::clicked, this, &MainWindow::onClearFiles);
+    connect(openFolderBtn_, &QPushButton::clicked, this, &MainWindow::onOpenOutputFolder);
+    connect(cancelBtn_, &QPushButton::clicked, this, &MainWindow::onCancelClicked);
+    connect(startCheckedBtn_, &QPushButton::clicked, this, &MainWindow::onStartCheckedClicked);
+    connect(startAllBtn_, &QPushButton::clicked, this, &MainWindow::onStartAllClicked);
 
     connect(selectAllBtn_, &QPushButton::clicked, this, &MainWindow::onSelectAllFiles);
     connect(selectNoneBtn_, &QPushButton::clicked, this, &MainWindow::onSelectNoFiles);
@@ -389,6 +461,14 @@ void MainWindow::onFileSelectionChanged() {
     updateUiState(false);
 }
 
+// One funnel for "the PDF list changed": counts, button labels, enabled state.
+void MainWindow::refreshFileListUi() {
+    rebuildFileIndex();
+    refreshSummary();
+    refreshActionLabels();
+    updateUiState(taskManager_.isRunning());
+}
+
 void MainWindow::onAddFiles() {
     QStringList files = QFileDialog::getOpenFileNames(
         this, "选择 PDF 文件", QString(), "PDF 文件 (*.pdf)"
@@ -400,7 +480,7 @@ void MainWindow::onAddFiles() {
         appendFileRow(file);
     }
 
-    rebuildFileIndex();
+    refreshFileListUi();
     if (wasEmpty && fileTable_->rowCount() > 0) {
         fileTable_->selectRow(0);
     }
@@ -421,7 +501,7 @@ void MainWindow::onAddFolder() {
     for (const auto& fi : list) {
         appendFileRow(fi.absoluteFilePath());
     }
-    rebuildFileIndex();
+    refreshFileListUi();
     int added = fileTable_->rowCount() - beforeCount;
     if (beforeCount == 0 && added > 0) {
         fileTable_->selectRow(0);
@@ -446,7 +526,7 @@ void MainWindow::dropEvent(QDropEvent* event) {
 
         appendFileRow(file);
     }
-    rebuildFileIndex();
+    refreshFileListUi();
     if (wasEmpty && fileTable_->rowCount() > 0) {
         fileTable_->selectRow(0);
     }
@@ -1015,29 +1095,29 @@ void MainWindow::refreshTemplateList(const QString& select) {
         }
         const WatermarkConfig st = tpl.style();
 
-        // Show the grouping/naming extras only when they add information: a
-        // plain template still renders as before, while a variant makes it
-        // obvious why two rows share one output folder.
+        // The delegate draws two lines: the name (line 1) plus a muted meta line
+        // and the output folder chip, so long names no longer need a horizontal
+        // scrollbar and the row stays readable.
         const QString folder = QString::fromUtf8(tpl.folderName().c_str());
-        QStringList extras;
+        QStringList meta;
+        meta << QStringLiteral("%1 行 · %2pt · %3% · %4°")
+                    .arg(lines).arg(st.fontSizePt)
+                    .arg(static_cast<int>(st.opacity * 100.0 + 0.5))
+                    .arg(st.rotationDegrees);
         if (!tpl.variantSuffix.empty()) {
-            extras << QStringLiteral("变体 %1").arg(QString::fromUtf8(tpl.variantSuffix.c_str()));
+            meta << QStringLiteral("变体 %1").arg(QString::fromUtf8(tpl.variantSuffix.c_str()));
         }
-        if (tpl.outputFolder.empty() || tpl.outputFolder == tpl.name) {
-            extras << QStringLiteral("→ %1/").arg(folder);
-        } else {
-            extras << QStringLiteral("→ %1/（合并）").arg(folder);
-        }
+        const bool merged = !tpl.outputFolder.empty() && tpl.outputFolder != tpl.name;
+        const QString folderChip = merged ? QStringLiteral("%1/（合并）").arg(folder)
+                                          : QStringLiteral("%1/").arg(folder);
 
-        auto* item = new QListWidgetItem(QString("%1    ·    %2 条 · %3pt · %4° · %5%    ·    %6")
-            .arg(name).arg(lines).arg(st.fontSizePt)
-            .arg(st.rotationDegrees)
-            .arg(static_cast<int>(st.opacity * 100.0 + 0.5))
-            .arg(extras.join(QStringLiteral(" "))));
+        auto* item = new QListWidgetItem(name);
         item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
         // Set the state before insertion so building the list emits no signals.
         item->setCheckState(Qt::Checked);
         item->setData(Qt::UserRole, name);
+        item->setData(TemplateListDelegate::MetaRole, meta.join(QStringLiteral(" · ")));
+        item->setData(TemplateListDelegate::FolderRole, folderChip);
         item->setToolTip(QString("模板「%1」\n水印文字：\n%2\n\n"
                                  "勾选 = 参与生成；输出目录：%3/；文件名后缀：%4")
             .arg(name).arg(texts.join("\n"))
@@ -1226,18 +1306,16 @@ void MainWindow::onPreviewTemplate() {
             .arg(static_cast<int>(st.opacity * 100.0 + 0.5)),
         dlg);
     infoLabel->setWordWrap(true);
-    infoLabel->setStyleSheet("color:#444; font-size:13px;");
+    infoLabel->setObjectName("chip");
     layout->addWidget(infoLabel);
 
     auto* imgLabel = new QLabel(dlg);
-    imgLabel->setFrameShape(QFrame::Box);
+    imgLabel->setObjectName("previewFrame");
     imgLabel->setAlignment(Qt::AlignCenter);
     imgLabel->setPixmap(QPixmap::fromImage(previewImg));
-    imgLabel->setStyleSheet("background-color: white; border: 1px solid #ccc;");
     layout->addWidget(imgLabel, 1);
 
-    auto* closeBtn = new QPushButton("关闭", dlg);
-    closeBtn->setStyleSheet("padding: 6px 20px;");
+    auto* closeBtn = makeButton("关闭", "", "关闭预览", dlg);
     connect(closeBtn, &QPushButton::clicked, dlg, &QDialog::accept);
     auto* btnBox = new QHBoxLayout();
     btnBox->addStretch();
@@ -1255,18 +1333,28 @@ void MainWindow::refreshSummary() {
     const int tpls = checkedTemplateCount();
     const int totalTpls = templateList_ ? templateList_->count() : 0;
 
-    if (totalTpls == 0) {
-        summaryLabel_->setText(
-            "还没有水印模板。\n\n"
-            "模板是全局的（与 PDF 无关）：点「新建模板...」创建，"
-            "模板名会作为输出子目录名（建议用公司名或用途）。");
-        return;
+    // Count chips in the two cards.
+    if (fileCountLabel_) {
+        fileCountLabel_->setText(
+            theme::chip("已勾选", QString("%1 / %2").arg(files).arg(totalFiles)));
     }
-    summaryLabel_->setText(QString(
-        "PDF：%1 / %2 个已勾选\n"
-        "模板：%3 / %4 个已勾选\n"
-        "本次输出：%5 个文件（%1 × %3），每个模板一个目录")
-        .arg(files).arg(totalFiles).arg(tpls).arg(totalTpls).arg(files * tpls));
+    if (templateCountLabel_) {
+        templateCountLabel_->setText(
+            theme::chip("已选", QString("%1 / %2").arg(tpls).arg(totalTpls)));
+    }
+
+    // Empty states: a hint page instead of a blank table/list.
+    if (fileStack_) fileStack_->setCurrentIndex(totalFiles == 0 ? 0 : 1);
+    if (templateStack_) templateStack_->setCurrentIndex(totalTpls == 0 ? 0 : 1);
+
+    summaryLabel_->setText(
+        theme::chip("待处理", QStringLiteral("%1 个 PDF").arg(totalFiles)) + theme::separator() +
+        theme::chip("已选模板", QStringLiteral("%1 个").arg(tpls)) + theme::separator() +
+        theme::chip("本次输出", QStringLiteral("%1 个文件").arg(files * tpls)));
+    summaryLabel_->setToolTip(
+        totalFiles == 0
+            ? QStringLiteral("先添加 PDF，再勾选要使用的模板")
+            : QStringLiteral("勾选的 PDF × 勾选的模板 = 每个模板输出一个子目录"));
 }
 
 void MainWindow::refreshActionLabels() {
@@ -1318,6 +1406,11 @@ void MainWindow::updateUiState(bool running) {
     startAllBtn_->setEnabled(!running && hasRows && tpls > 0);
     selectAllBtn_->setEnabled(!running && hasRows);
     selectNoneBtn_->setEnabled(!running && hasRows);
+
+    addFilesBtn_->setEnabled(!running);
+    addFolderBtn_->setEnabled(!running);
+    removeSelBtn_->setEnabled(!running && hasRows);
+    clearFilesBtn_->setEnabled(!running && hasRows);
 
     newTemplateBtn_->setEnabled(!running);
     editTemplateBtn_->setEnabled(!running && hasSel);

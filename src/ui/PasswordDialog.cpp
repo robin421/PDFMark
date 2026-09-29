@@ -1,5 +1,6 @@
 // PDFMark - PasswordDialog implementation.
 #include "ui/PasswordDialog.h"
+#include "ui/Theme.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -11,12 +12,16 @@ PasswordDialog::PasswordDialog(const QString& fileName, QWidget* parent)
     : QDialog(parent) {
     setWindowTitle("输入 PDF 密码");
     setModal(true);
-    setFixedSize(380, 160);
+    setMinimumWidth(400);
 
     auto* layout = new QVBoxLayout(this);
+    layout->setContentsMargins(18, 16, 18, 16);
+    layout->setSpacing(12);
 
     auto* tip = new QLabel(
-        QString("文件 <b>%1</b> 已加密，请输入打开密码：").arg(fileName), this
+        QString("<span style='color:%1'>文件</span> <b>%2</b> "
+                "<span style='color:%1'>已加密，请输入打开密码：</span>")
+            .arg(QLatin1String(theme::kTextSecondary), fileName.toHtmlEscaped()), this
     );
     tip->setWordWrap(true);
     layout->addWidget(tip);
@@ -30,7 +35,9 @@ PasswordDialog::PasswordDialog(const QString& fileName, QWidget* parent)
     btnLayout->addStretch();
 
     auto* cancelBtn = new QPushButton("跳过", this);
+    cancelBtn->setObjectName("ghost");
     auto* okBtn = new QPushButton("确认", this);
+    okBtn->setObjectName("primary");
     okBtn->setDefault(true);
 
     connect(okBtn, &QPushButton::clicked, this, &QDialog::accept);
