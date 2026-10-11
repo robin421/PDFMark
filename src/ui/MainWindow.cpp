@@ -1121,6 +1121,9 @@ void MainWindow::refreshTemplateList(const QString& select) {
         if (!tpl.variantSuffix.empty()) {
             meta << QStringLiteral("变体 %1").arg(QString::fromUtf8(tpl.variantSuffix.c_str()));
         }
+        if (!tpl.styleName.empty()) {
+            meta << QString::fromUtf8(tpl.styleName.c_str());
+        }
         const bool merged = !tpl.outputFolder.empty() && tpl.outputFolder != tpl.name;
         const QString folderChip = merged ? QStringLiteral("%1/（合并）").arg(folder)
                                           : QStringLiteral("%1/").arg(folder);
@@ -1217,7 +1220,8 @@ void MainWindow::onNewTemplate() {
     // to a sibling ("机密 (2)") and merges its output into the same folder, which
     // is exactly the "same text, different style" case.
     TemplateEditDialog dlg(WatermarkTemplate{}, true,
-                           templateStore_.names(), templateStore_.folderNames(), this);
+                           templateStore_.names(), templateStore_.folderNames(),
+                           &templateStore_, this);
     if (dlg.exec() != QDialog::Accepted) return;
 
     const WatermarkTemplate tpl = dlg.result();
@@ -1243,7 +1247,8 @@ void MainWindow::onEditTemplate() {
     // instead of overwriting it.
     QStringList taken = templateStore_.names();
     taken.removeAll(QString::fromUtf8(cur.name.c_str()));
-    TemplateEditDialog dlg(cur, false, taken, templateStore_.folderNames(), this);
+    TemplateEditDialog dlg(cur, false, taken, templateStore_.folderNames(),
+                           &templateStore_, this);
     if (dlg.exec() != QDialog::Accepted) return;
 
     const WatermarkTemplate edited = dlg.result();

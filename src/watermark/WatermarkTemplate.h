@@ -3,10 +3,48 @@
 
 #include "watermark/WatermarkConfig.h"
 #include <algorithm>
+#include <array>
 #include <string>
 #include <vector>
 
 namespace pdfmark {
+
+// The app ships exactly two GLOBAL style presets, "样式1" and "样式2". They are
+// the only place a watermark style is authored: the editor lets the user pick
+// one and tweak it, and every change is written to disk immediately. A template
+// stores a plain COPY of the resulting style fields, so later preset edits never
+// rewrite an already-saved template (see README "样式预设").
+inline constexpr int kStylePresetCount = 2;
+
+// "样式1" for index 0, "样式2" for index 1.
+inline std::string stylePresetName(int index) {
+    return "样式" + std::to_string(index + 1);
+}
+
+// Built-in defaults, used on first run and whenever the store has no "styles"
+// entry yet (v1/v2 files). 样式1 keeps the historical look, 样式2 is deliberately
+// different so the two choices are tellable apart out of the box.
+inline std::array<WatermarkConfig, kStylePresetCount> builtinStylePresets() {
+    WatermarkConfig light;      // 样式1: existing defaults, nothing looks new
+    light.text.clear();
+    light.opacity = 0.12;
+    light.colorHex = "#BEBEBE";
+    light.rotationDegrees = -35.0;
+    light.fontFamily = "Arial";
+    light.fontBold = true;
+    light.fontItalic = false;
+
+    WatermarkConfig deep;       // 样式2: deeper, taller slant, serif + italic
+    deep.text.clear();
+    deep.opacity = 0.30;
+    deep.colorHex = "#808080";
+    deep.rotationDegrees = -45.0;
+    deep.fontFamily = "Times New Roman";
+    deep.fontBold = false;
+    deep.fontItalic = true;
+
+    return {light, deep};
+}
 
 // Trims leading/trailing spaces, tabs and newlines. Returns an empty string when
 // the input is blank, so callers can use it for "was anything actually typed?".
@@ -36,6 +74,12 @@ struct WatermarkTemplate {
     // created before this field existed keep writing to the same place.
     std::string variantSuffix;
     std::string outputFolder;
+
+    // Which GLOBAL style preset (stylePresetName(i)) this template was saved
+    // with. Descriptive only: the real style parameters live in `watermarks[]`,
+    // so editing that preset afterwards never rewrites this template. Empty for
+    // files written before schema v3.
+    std::string styleName;
 
     // Effective output sub-directory: the explicit override when set, the
     // template name otherwise. Single source of truth for UI + pipeline.

@@ -329,6 +329,63 @@ void testWatermarkTemplate() {
         assert(store.templates().empty());
     }
 
+    // ── global style presets (样式1 / 样式2) ────────────────────────────────
+    {
+        WatermarkTemplateStore fresh(QString::fromStdString(
+            pathToString(dir / "no_styles_yet.json")));
+        assert(!fresh.load());
+        assert(builtinStylePresets().size() == static_cast<size_t>(kStylePresetCount));
+        assert(!nearly(fresh.stylePreset(0).opacity, fresh.stylePreset(1).opacity));
+        // Out-of-range reads clamp to 样式1 instead of being UB.
+        assert(nearly(fresh.stylePreset(-1).opacity, fresh.stylePreset(0).opacity));
+        assert(nearly(fresh.stylePreset(99).opacity, fresh.stylePreset(0).opacity));
+
+        // Editing 样式2 writes the file immediately and survives a reload.
+        WatermarkConfig edited = fresh.stylePreset(1);
+        edited.opacity = 0.42;
+        edited.rotationDegrees = -12.5;
+        edited.fontItalic = false;
+        assert(fresh.saveStylePreset(1, edited));
+        assert(!fresh.saveStylePreset(5, edited));   // out of range rejected
+
+        WatermarkTemplateStore reloaded(fresh.filePath());
+        assert(reloaded.load());
+        assert(nearly(reloaded.stylePreset(1).opacity, 0.42));
+        assert(nearly(reloaded.stylePreset(1).rotationDegrees, -12.5));
+        assert(reloaded.stylePreset(1).fontItalic == false);
+        // 样式1 is untouched by the 样式2 edit.
+        assert(nearly(reloaded.stylePreset(0).opacity, builtinStylePresets()[0].opacity));
+    }
+
+    // ── v1/v2 files without "styles" fall back to the built-in presets ─────
+    {
+        const fs::path oldPath = dir / "styles_absent.json";
+        std::ofstream out(oldPath.string());
+        out << R"({"version":2,"templates":[{"name":"旧模板","watermarks":[{"text":"旧水印"}]}]})";
+        out.close();
+
+        WatermarkTemplateStore store(QString::fromStdString(pathToString(oldPath)));
+        assert(store.load());
+        assert(nearly(store.stylePreset(0).opacity, builtinStylePresets()[0].opacity));
+        assert(nearly(store.stylePreset(1).opacity, builtinStylePresets()[1].opacity));
+    }
+
+    // ── styleName round-trips with the template ────────────────────────────
+    {
+        WatermarkTemplate styled = makeTemplate("样式记录");
+        styled.styleName = stylePresetName(1);
+        WatermarkTemplateStore store(QString::fromStdString(
+            pathToString(dir / "style_name.json")));
+        assert(store.addOrReplace(styled) == false);
+        assert(store.save());
+
+        WatermarkTemplateStore reloaded(store.filePath());
+        assert(reloaded.load());
+        const WatermarkTemplate* found = reloaded.find(QString::fromUtf8("样式记录"));
+        assert(found != nullptr);
+        assert(found->styleName == stylePresetName(1));
+    }
+
     // ── template name derived from the watermark text (no user input) ─────
     {
         std::vector<WatermarkConfig> one;

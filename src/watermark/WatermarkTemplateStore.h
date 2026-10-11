@@ -4,6 +4,7 @@
 #include "watermark/WatermarkTemplate.h"
 #include <QString>
 #include <QStringList>
+#include <array>
 #include <vector>
 
 namespace pdfmark {
@@ -24,6 +25,13 @@ public:
     void setFilePath(const QString& path) { filePath_ = path; }
 
     const std::vector<WatermarkTemplate>& templates() const { return templates_; }
+
+    // ── Global style presets (样式1 / 样式2) ────────────────────────────
+    // Index is bounded: out-of-range reads return 样式1, writes are rejected.
+    const WatermarkConfig& stylePreset(int index) const;
+    // Persist one preset and write the file immediately (the editor calls this
+    // on every style edit, so it is the "auto-save" end point).
+    bool saveStylePreset(int index, const WatermarkConfig& cfg);
 
     // All template names (names are the store's uniqueness key).
     QStringList names() const;
@@ -52,6 +60,7 @@ public:
 private:
     QString filePath_;
     std::vector<WatermarkTemplate> templates_;
+    std::array<WatermarkConfig, kStylePresetCount> stylePresets_{builtinStylePresets()};
 };
 
 } // namespace pdfmark

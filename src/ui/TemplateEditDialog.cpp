@@ -1,6 +1,7 @@
 // PDFMark - Modal editor for a single watermark template.
 #include "ui/TemplateEditDialog.h"
 #include "watermark/WatermarkRenderer.h"
+#include "watermark/WatermarkTemplateStore.h"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -17,6 +18,7 @@
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QSpinBox>
+#include <QTimer>
 #include <algorithm>
 
 namespace pdfmark {
@@ -40,11 +42,44 @@ QString depthHintText(int percent) {
 TemplateEditDialog::TemplateEditDialog(const WatermarkTemplate& initial, bool creating,
                                        const QStringList& takenNames,
                                        const QStringList& knownFolders,
+                                       WatermarkTemplateStore* store,
                                        QWidget* parent)
-    : QDialog(parent), result_(initial), takenNames_(takenNames), knownFolders_(knownFolders) {
-    style0_ = initial.watermarks.empty() ? WatermarkConfig{} : initial.watermarks.front();
+    : QDialog(parent), result_(initial), takenNames_(takenNames), knownFolders_(knownFolders),
+      store_(store) {
+    // Which preset this template is based on: the recorded name first, then a
+    // value match against the live presets (files written before schema v3 have
+    // no styleName), then 样式1.
+    styleIndex_ = 0;
+    bool matched = false;
+    if (!initial.styleName.empty()) {
+        for (int i = 0; i < kStylePresetCount; ++i) {
+            if (stylePresetName(i) == initial.styleName) { styleIndex_ = i; matched = true; break; }
+        }
+    }
+    if (!matched && !initial.watermarks.empty()) {
+        const WatermarkConfig& stored = initial.watermarks.front();
+        for (int i = 0; i < kStylePresetCount; ++i) {
+            const WatermarkConfig& preset = presetAt(i);
+            if (preset.opacity == stored.opacity &&
+                preset.rotationDegrees == stored.rotationDegrees &&
+                preset.fontFamily == stored.fontFamily &&
+                preset.fontBold == stored.fontBold &&
+                preset.fontItalic == stored.fontItalic) {
+                styleIndex_ = i;
+                break;
+            }
+        }
+    }
+
     buildUi(creating);
-    applyStyleToUi(style0_);
+
+    // The widgets always mirror the selected preset: that is the single place a
+    // style is authored now. A template only keeps a copy of the result.
+    applyStyleToUi(presetAt(styleIndex_));
+    {
+        QSignalBlocker block(styleCombo_);
+        styleCombo_->setCurrentIndex(styleIndex_);
+    }
 
     if (!initial.watermarks.empty()) {
         for (const auto& wm : initial.watermarks) {
@@ -52,9 +87,6 @@ TemplateEditDialog::TemplateEditDialog(const WatermarkTemplate& initial, bool cr
         }
     } else {
         addTextRow(QString());
-    }
-    if (!initial.name.empty()) {
-        nameEdit_->setText(QString::fromUtf8(initial.name.c_str()));
     }
     if (!initial.variantSuffix.empty()) {
         variantEdit_->setText(QString::fromUtf8(initial.variantSuffix.c_str()));
@@ -86,20 +118,16 @@ void TemplateEditDialog::buildUi(bool creating) {
     auto* left = new QVBoxLayout();
     left->setSpacing(8);
 
-    auto* nameRow = new QHBoxLayout();
-    nameRow->setSpacing(8);
-    nameRow->addWidget(new QLabel(QStringLiteral("模板名称:"), this));
-    nameEdit_ = new QLineEdit(this);
-    // Object names make the dialog drivable from tests / UI automation.
-    nameEdit_->setObjectName(QStringLiteral("templateNameEdit"));
-    nameEdit_->setPlaceholderText(QStringLiteral("留空则自动使用水印文字首行（不限长度）"));
-    nameEdit_->setToolTip(QStringLiteral(
-        "模板在列表里的名字。默认也作为输出子目录名，"
-        "除非在下方指定了「输出文件夹」。\n"
-        "与已有模板重名时会自动变成「名字 (2)」，不会覆盖。\n"
-        "名字不限长度；作为目录名过长时会被截断并以 _哈希 结尾"));
-    nameRow->addWidget(nameEdit_, 1);
-    left->addLayout(nameRow);
+    // The template name is no longer typed: it always follows the first line of
+    // the watermark text (see templateNameFromConfigs).
+    auto* nameHint = new QLabel(QStringLiteral("模板名称自动取第一行水印文字，无需填写。"), this);
+    nameHint->setObjectName(QStringLiteral("templateNameHint"));
+    nameHint->setWordWrap(true);
+    nameHint->setToolTip(QStringLiteral(
+        "模板在列表里的名字 = 第一行水印文字（不限长度）。\n"
+        "默认也作为输出子目录名，除非在下方指定了「输出文件夹」。\n"
+        "与已有模板重名时会自动变成「名字 (2)」，不会覆盖。"));
+    left->addWidget(nameHint);
 
     // ── Output naming: which folder it lands in + how the file is named ──
     auto* outGroup = new QGroupBox(QStringLiteral("输出（文件夹 / 文件名）"), this);
@@ -169,6 +197,19 @@ void TemplateEditDialog::buildUi(bool creating) {
     grid->setVerticalSpacing(10);
 
     int r = 0;
+    grid->addWidget(new QLabel(QStringLiteral("样式:"), styleGroup), r, 0);
+    styleCombo_ = new QComboBox(styleGroup);
+    styleCombo_->setObjectName(QStringLiteral("templateStyleCombo"));
+    for (int i = 0; i < kStylePresetCount; ++i) {
+        styleCombo_->addItem(QString::fromUtf8(stylePresetName(i).c_str()));
+    }
+    styleCombo_->setToolTip(QStringLiteral(
+        "全局样式预设，所有模板共用「样式1 / 样式2」。\n"
+        "调整任意样式参数会立即保存到配置（无需点「保存」）。\n"
+        "已保存的旧模板不受影响，只有之后选用该样式的模板会拿到新参数。"));
+    grid->addWidget(styleCombo_, r, 1);
+    r++;
+
     grid->addWidget(new QLabel(QStringLiteral("颜色深浅:"), styleGroup), r, 0);
     auto* depthBox = new QWidget(styleGroup);
     auto* depthLayout = new QHBoxLayout(depthBox);
@@ -253,20 +294,27 @@ void TemplateEditDialog::buildUi(bool creating) {
             depthSpin_->setValue(v);
         }
         depthHint_->setText(depthHintText(v));
-        refreshPreview();
+        onStyleEdited();
     });
     connect(depthSpin_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int v) {
         if (depthSlider_->value() != v) depthSlider_->setValue(v);
     });
     connect(rotationSpin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-            this, [this](double) { refreshPreview(); });
+            this, [this](double) { onStyleEdited(); });
     connect(fontCombo_, &QFontComboBox::currentFontChanged, this, [this](const QFont&) {
-        refreshPreview();
+        onStyleEdited();
     });
-    connect(boldCheck_, &QCheckBox::toggled, this, [this](bool) { refreshPreview(); });
-    connect(italicCheck_, &QCheckBox::toggled, this, [this](bool) { refreshPreview(); });
+    connect(boldCheck_, &QCheckBox::toggled, this, [this](bool) { onStyleEdited(); });
+    connect(italicCheck_, &QCheckBox::toggled, this, [this](bool) { onStyleEdited(); });
+    connect(styleCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &TemplateEditDialog::onStylePresetChanged);
+    // Auto-save is debounced: dragging the opacity slider emits one value per
+    // pixel and every save rewrites the whole template JSON file.
+    styleSaveTimer_ = new QTimer(this);
+    styleSaveTimer_->setSingleShot(true);
+    styleSaveTimer_->setInterval(300);
+    connect(styleSaveTimer_, &QTimer::timeout, this, [this]() { persistSelectedStyle(); });
     // Naming widgets do not change the rendered preview, only the result hint.
-    connect(nameEdit_, &QLineEdit::textChanged, this, [this](const QString&) { refreshOutputHint(); });
     connect(variantEdit_, &QLineEdit::textChanged, this, [this](const QString&) { refreshOutputHint(); });
     connect(folderCombo_, &QComboBox::currentTextChanged, this,
             [this](const QString&) { refreshOutputHint(); });
@@ -337,12 +385,11 @@ std::vector<WatermarkConfig> TemplateEditDialog::linesFromUi() const {
 }
 
 WatermarkConfig TemplateEditDialog::styleFromUi() const {
-    WatermarkConfig cfg = style0_;
+    // Start from whatever the widgets currently represent so the fields this
+    // dialog does not expose (dpi / jpegQuality / colorHex / fontSizePt) keep the
+    // preset's values instead of the historical hard-coded ones.
+    WatermarkConfig cfg = currentStyle_;
     cfg.text.clear();
-    cfg.fontSizePt = 24;
-    cfg.dpi = 200;
-    cfg.jpegQuality = 85;
-    cfg.colorHex = "#808080";
     cfg.rotationDegrees = rotationSpin_->value();
     cfg.fontFamily = fontCombo_->currentFont().family().toStdString();
     cfg.fontBold = boldCheck_->isChecked();
@@ -352,6 +399,16 @@ WatermarkConfig TemplateEditDialog::styleFromUi() const {
 }
 
 void TemplateEditDialog::applyStyleToUi(const WatermarkConfig& style) {
+    currentStyle_ = style;
+    // Loading a style is not an edit: block every style widget so the preview
+    // updates without scheduling an automatic write-back of what we just read.
+    QSignalBlocker blockRotation(rotationSpin_);
+    QSignalBlocker blockFont(fontCombo_);
+    QSignalBlocker blockBold(boldCheck_);
+    QSignalBlocker blockItalic(italicCheck_);
+    QSignalBlocker blockSlider(depthSlider_);
+    QSignalBlocker blockSpin(depthSpin_);
+
     rotationSpin_->setValue(style.rotationDegrees);
     fontCombo_->setCurrentFont(QFont(style.fontFamily.empty()
         ? QStringLiteral("Arial") : QString::fromUtf8(style.fontFamily.c_str())));
@@ -359,13 +416,45 @@ void TemplateEditDialog::applyStyleToUi(const WatermarkConfig& style) {
     italicCheck_->setChecked(style.fontItalic);
 
     const int percent = static_cast<int>(style.opacity * 100.0 + 0.5);
-    {
-        QSignalBlocker blockSlider(depthSlider_);
-        QSignalBlocker blockSpin(depthSpin_);
-        depthSlider_->setValue(percent);
-        depthSpin_->setValue(percent);
-    }
+    depthSlider_->setValue(percent);
+    depthSpin_->setValue(percent);
     depthHint_->setText(depthHintText(percent));
+}
+
+WatermarkConfig TemplateEditDialog::presetAt(int index) const {
+    if (store_) return store_->stylePreset(index);
+    const auto builtins = builtinStylePresets();
+    if (index < 0 || index >= kStylePresetCount) index = 0;
+    return builtins[static_cast<size_t>(index)];
+}
+
+void TemplateEditDialog::onStylePresetChanged(int index) {
+    if (index < 0 || index >= kStylePresetCount) return;
+    styleIndex_ = index;
+    applyStyleToUi(presetAt(index));
+    refreshPreview();
+}
+
+void TemplateEditDialog::onStyleEdited() {
+    refreshPreview();
+    scheduleStyleSave();
+}
+
+void TemplateEditDialog::scheduleStyleSave() {
+    if (!store_ || !styleSaveTimer_) return;   // no global preset to persist
+    styleSaveTimer_->start();
+}
+
+void TemplateEditDialog::persistSelectedStyle() {
+    if (!store_) return;
+    store_->saveStylePreset(styleIndex_, styleFromUi());
+}
+
+void TemplateEditDialog::flushPendingStyleSave() {
+    if (styleSaveTimer_ && styleSaveTimer_->isActive()) {
+        styleSaveTimer_->stop();
+        persistSelectedStyle();
+    }
 }
 
 void TemplateEditDialog::refreshPreview() {
@@ -410,15 +499,14 @@ TemplateNaming TemplateEditDialog::resolveNaming() const {
     const std::string folder = (typedFolder == kDefaultFolderOption.toUtf8().toStdString())
         ? std::string() : typedFolder;
 
-    return resolveTemplateNaming(nameEdit_->text().trimmed().toUtf8().toStdString(),
-                                 linesFromUi(), taken, folder);
+    return resolveTemplateNaming(std::string(), linesFromUi(), taken, folder);
 }
 
 void TemplateEditDialog::refreshOutputHint() {
     if (!outputHint_) return;
 
-    const QString typedName = nameEdit_->text().trimmed();
-    const QString base = typedName.isEmpty() ? autoName() : typedName;
+    // The name is always derived from the text now (there is no name field).
+    const QString base = autoName();
     if (base.isEmpty()) {
         outputHint_->setText(QStringLiteral("填写水印文字后，这里会显示输出位置与文件名。"));
         return;
@@ -449,8 +537,13 @@ void TemplateEditDialog::refreshOutputHint() {
 }
 
 void TemplateEditDialog::accept() {
+    // Nothing may be lost to the debounce window: flush a pending style save
+    // before the template itself is written.
+    flushPendingStyleSave();
+
     WatermarkTemplate tpl;
     tpl.name = resolvedName().toUtf8().toStdString();
+    tpl.styleName = stylePresetName(styleIndex_);
     tpl.variantSuffix = variantEdit_->text().trimmed().toUtf8().toStdString();
     tpl.outputFolder = resolvedFolder();
     tpl.watermarks = linesFromUi();
@@ -462,6 +555,13 @@ void TemplateEditDialog::accept() {
     }
     result_ = tpl;
     QDialog::accept();
+}
+
+void TemplateEditDialog::reject() {
+    // Style edits are auto-saved, so a pending one is flushed even when the
+    // template itself is discarded (取消 only drops text / folder changes).
+    flushPendingStyleSave();
+    QDialog::reject();
 }
 
 } // namespace pdfmark

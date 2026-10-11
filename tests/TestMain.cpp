@@ -17,6 +17,7 @@ namespace pdfmark {
     void testConcurrencyBudget();
     void testOutputNaming();
     void testTemplateDialogNaming();
+    void testTemplateDialogStylePresets();
 }
 
 int main(int argc, char* argv[]) {
@@ -69,6 +70,7 @@ int main(int argc, char* argv[]) {
         }
         if (testName == "ALL" || testName == "TemplateDialog") {
             pdfmark::testTemplateDialogNaming();
+            pdfmark::testTemplateDialogStylePresets();
         }
 
         std::cout << "\n==============================\n";

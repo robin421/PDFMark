@@ -10,12 +10,13 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QStandardPaths>
+#include <algorithm>
 
 namespace pdfmark {
 
 namespace {
 
-constexpr int kSchemaVersion = 2;   // 2 adds variantSuffix + outputFolder (v1 still loads)
+constexpr int kSchemaVersion = 3;   // 3 adds global style presets; v1/v2 still load
 
 QJsonObject configToJson(const WatermarkConfig& cfg) {
     QJsonObject o;
@@ -71,6 +72,9 @@ QString WatermarkTemplateStore::defaultFilePath() {
 
 bool WatermarkTemplateStore::load() {
     templates_.clear();
+    // Presets always start from the built-ins: a missing "styles" entry (v1/v2
+    // files) must not inherit whatever the previous caller left in memory.
+    stylePresets_ = builtinStylePresets();
 
     QFile file(filePath_);
     if (!file.exists()) {
@@ -98,6 +102,7 @@ bool WatermarkTemplateStore::load() {
         // mean "use the template name" / "no file-name suffix".
         tpl.variantSuffix = obj.value("variantSuffix").toString().toUtf8().toStdString();
         tpl.outputFolder = obj.value("outputFolder").toString().toUtf8().toStdString();
+        tpl.styleName = obj.value("styleName").toString().toUtf8().toStdString();
         const QJsonArray wms = obj.value("watermarks").toArray();
         tpl.watermarks.reserve(static_cast<size_t>(wms.size()));
         for (const auto& w : wms) {
@@ -113,6 +118,17 @@ bool WatermarkTemplateStore::load() {
             continue;
         }
         templates_.push_back(std::move(tpl));
+    }
+
+    // Optional since schema 3: a shorter/missing array keeps the built-ins for
+    // the untouched slots.
+    const QJsonArray styles = doc.object().value("styles").toArray();
+    const int loadedPresets = std::min(static_cast<int>(styles.size()), kStylePresetCount);
+    for (int i = 0; i < loadedPresets; ++i) {
+        WatermarkConfig cfg = configFromJson(styles.at(i).toObject());
+        cfg.text.clear();          // presets carry style only
+        cfg.selected = true;
+        stylePresets_[static_cast<size_t>(i)] = cfg;
     }
     return true;
 }
@@ -135,6 +151,9 @@ bool WatermarkTemplateStore::save() const {
         if (!tpl.outputFolder.empty()) {
             obj["outputFolder"] = QString::fromUtf8(tpl.outputFolder.c_str());
         }
+        if (!tpl.styleName.empty()) {
+            obj["styleName"] = QString::fromUtf8(tpl.styleName.c_str());
+        }
         QJsonArray wms;
         for (const auto& cfg : tpl.watermarks) {
             wms.append(configToJson(cfg));
@@ -146,6 +165,14 @@ bool WatermarkTemplateStore::save() const {
     QJsonObject root;
     root["version"] = kSchemaVersion;
     root["templates"] = arr;
+
+    // Global style presets. Always written: they are part of the app state, not
+    // a per-template option.
+    QJsonArray styles;
+    for (const auto& preset : stylePresets_) {
+        styles.append(configToJson(preset));
+    }
+    root["styles"] = styles;
 
     QFile file(filePath_);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
@@ -220,6 +247,20 @@ const WatermarkTemplate* WatermarkTemplateStore::find(const QString& name) const
         }
     }
     return nullptr;
+}
+
+const WatermarkConfig& WatermarkTemplateStore::stylePreset(int index) const {
+    if (index < 0 || index >= kStylePresetCount) index = 0;
+    return stylePresets_[static_cast<size_t>(index)];
+}
+
+bool WatermarkTemplateStore::saveStylePreset(int index, const WatermarkConfig& cfg) {
+    if (index < 0 || index >= kStylePresetCount) return false;
+    WatermarkConfig preset = cfg;
+    preset.text.clear();       // presets are style-only
+    preset.selected = true;    // the UI-only flag has no meaning here
+    stylePresets_[static_cast<size_t>(index)] = preset;
+    return save();
 }
 
 } // namespace pdfmark
